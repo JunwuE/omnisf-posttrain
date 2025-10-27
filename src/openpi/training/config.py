@@ -473,6 +473,19 @@ class TrainConfig:
     # Optional path to a PyTorch checkpoint to load weights from.
     pytorch_weight_path: str | None = None
 
+    # Spatial Forcing configs
+    vggt_weight_path: str | None = None
+    vggt_dim: int = 1024
+
+    vla_layers_align: int | None = None  # total 18 for paligemma-2b
+    vggt_layers_align: int | None = None  # total 24 for VGGT
+
+    pooling_func: str | None = None
+    use_vggt_pe: bool | None = None
+    use_vlm_norm: bool | None = None
+
+    align_loss_coeff: float = 0.0
+
     # Precision for PyTorch training.
     pytorch_training_precision: Literal["bfloat16", "float32"] = "bfloat16"
 
@@ -754,6 +767,51 @@ _CONFIGS = [
     ),
     #
     # Fine-tuning Aloha configs.
+    #
+    # Personal Tasks
+    TrainConfig(
+        name="torch_pi0_aloha_place_one_floor_block",
+        model=pi0_config.Pi0Config(),
+        data=LeRobotAlohaDataConfig(
+            repo_id="real_world_dataset/place_one_floor_block",  # your datasets repo_id
+            # assets=AssetsConfig(
+            #     assets_dir="/data/user/hsong425/.cache/openpi/openpi-assets/checkpoints/pi0_base/assets",
+            #     asset_id="trossen",
+            # ),
+            default_prompt="place the block",
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left_wrist": "observation.images.cam_left_wrist",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/user/hsong425/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"),
+        pytorch_weight_path='/data/user/wsong890/lifuhao/openpi-main/checkpoints/pytorch_pi0_base',
+        #
+        vggt_weight_path='/data/user/wsong890/lifuhao/openpi-main/checkpoints/vggt',
+        vla_layers_align=12,
+        vggt_layers_align=-1,
+        pooling_func='bilinear',
+        use_vggt_pe=True,
+        use_vlm_norm=True,
+        align_loss_coeff=0.5,
+        #
+        num_train_steps=20_000,
+        batch_size=16,
+        save_interval=20_000,
+        ema_decay=None,
+        wandb_enabled=False,
+    ),
     #
     # This is a test config that is used to illustate how train on a custom LeRobot dataset.
     # For instuctions on how to convert and train on your own Aloha dataset see examples/aloha_real/README.md

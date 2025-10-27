@@ -21,6 +21,7 @@ def preprocess_observation_pytorch(
     observation,
     *,
     train: bool = False,
+    get_wo_aug: bool = False,
     image_keys: Sequence[str] = IMAGE_KEYS,
     image_resolution: tuple[int, int] = IMAGE_RESOLUTION,
 ):
@@ -34,6 +35,7 @@ def preprocess_observation_pytorch(
     batch_shape = observation.state.shape[:-1]
 
     out_images = {}
+    out_images_wo_aug = {}
     for key in image_keys:
         image = observation.images[key]
 
@@ -54,7 +56,7 @@ def preprocess_observation_pytorch(
             image = image / 2.0 + 0.5
 
             # Apply PyTorch-based augmentations
-            if "wrist" not in key:
+            if "wrist" not in key and not get_wo_aug:
                 # Geometric augmentations for non-wrist cameras
                 height, width = image.shape[1:3]
 
@@ -116,6 +118,11 @@ def preprocess_observation_pytorch(
                         align_corners=False,
                     ).permute(0, 2, 3, 1)  # [b, c, h, w] -> [b, h, w, c]
 
+            # Save original images (with rotation, but without color aug) for VGGT input
+            img_inv_padding = torch.where(image == 0, torch.tensor(1, dtype=image.dtype), image)
+            img_inv_padding = img_inv_padding.permute(0, 3, 1, 2) if is_channels_first else img_inv_padding
+            out_images_wo_aug[key] = img_inv_padding.contiguous()
+
             # Color augmentations for all cameras
             # Random brightness
             # Use tensor operations instead of .item() for torch.compile compatibility
@@ -162,12 +169,17 @@ def preprocess_observation_pytorch(
             for key, value in kwargs.items():
                 setattr(self, key, value)
 
-    return SimpleProcessedObservation(
-        images=out_images,
-        image_masks=out_masks,
-        state=observation.state,
-        tokenized_prompt=observation.tokenized_prompt,
-        tokenized_prompt_mask=observation.tokenized_prompt_mask,
-        token_ar_mask=observation.token_ar_mask,
-        token_loss_mask=observation.token_loss_mask,
-    )
+    result_kwargs = {
+        "images": out_images,
+        "image_masks": out_masks,
+        "state": observation.state,
+        "tokenized_prompt": observation.tokenized_prompt,
+        "tokenized_prompt_mask": observation.tokenized_prompt_mask,
+        "token_ar_mask": observation.token_ar_mask,
+        "token_loss_mask": observation.token_loss_mask,
+    }
+
+    if get_wo_aug:
+        result_kwargs["img_wo_aug"] = out_images_wo_aug
+
+    return SimpleProcessedObservation(**result_kwargs)

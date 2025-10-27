@@ -96,6 +96,7 @@ class PaliGemmaWithExpertModel(nn.Module):
         inputs_embeds: list[torch.FloatTensor] | None = None,
         use_cache: bool | None = None,
         adarms_cond: list[torch.Tensor] | None = None,
+        output_hidden_states: bool | None = None,
     ):
         if adarms_cond is None:
             adarms_cond = [None, None]
@@ -238,7 +239,10 @@ class PaliGemmaWithExpertModel(nn.Module):
                 return outputs_embeds
 
             # Process all layers with gradient checkpointing if enabled
+            all_hidden_states = () if output_hidden_states else None
             for layer_idx in range(num_layers):
+                if output_hidden_states:
+                    all_hidden_states += (inputs_embeds,)
                 if use_gradient_checkpointing:
                     inputs_embeds = torch.utils.checkpoint.checkpoint(
                         compute_layer_complete,
@@ -274,8 +278,14 @@ class PaliGemmaWithExpertModel(nn.Module):
             else:
                 outputs_embeds = compute_final_norms(inputs_embeds, adarms_cond)
 
+            if output_hidden_states:
+                all_hidden_states += (outputs_embeds,)
+
             prefix_output = outputs_embeds[0]
             suffix_output = outputs_embeds[1]
             prefix_past_key_values = None
 
+        if output_hidden_states:
+            return [prefix_output, suffix_output], prefix_past_key_values, all_hidden_states
+        
         return [prefix_output, suffix_output], prefix_past_key_values
