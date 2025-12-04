@@ -48,13 +48,15 @@ import openpi.training.data_loader as _data
 
 from vggt.models.vggt import VGGT
 
-# import debugpy
-# try:
-#     debugpy.listen(("localhost", 9602))
-#     print("Waiting for debugger attach")
-#     debugpy.wait_for_client()
-# except Exception as e:
-#     pass
+os.environ["WANDB_MODE"]="offline"
+
+import debugpy
+try:
+    debugpy.listen(("localhost", 9501))
+    print("Waiting for debugger attach")
+    debugpy.wait_for_client()
+except Exception as e:
+    pass
 
 
 def init_logging():
@@ -97,6 +99,7 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, enabled: bool = T
             name=config.exp_name,
             config=dataclasses.asdict(config),
             project=config.project_name,
+            id=": ".join([config.name, config.exp_name]),
         )
         (ckpt_dir / "wandb_id.txt").write_text(wandb.run.id)
 

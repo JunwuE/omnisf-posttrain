@@ -458,7 +458,7 @@ class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
     name: tyro.conf.Suppress[str]
     # Project name.
-    project_name: str = "openpi"
+    project_name: str = "SF_openpi"
     # Experiment name. Will be used to name the metadata and checkpoint directories.
     exp_name: str = tyro.MISSING
 
@@ -654,6 +654,44 @@ _CONFIGS = [
     # the comments below.
     TrainConfig(
         # Change the name to reflect your model and dataset.
+        name="torch_pi0_libero",
+        # Here you define the model config -- In this example we use pi0 as the model
+        # architecture and perform *full* finetuning. in the examples below we show how to modify
+        # this to perform *low-memory* (LORA) finetuning and use pi0-FAST as an alternative architecture.
+        model=pi0_config.Pi0Config(),
+        # Here you define the dataset you are training on. In this example we use the Libero
+        # dataset. For your own dataset, you can change the repo_id to point to your dataset.
+        # Also modify the DataConfig to use the new config you made for your dataset above.
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(
+                # This flag determines whether we load the prompt (i.e. the task instruction) from the
+                # ``task`` field in the LeRobot dataset. If set to True, the prompt will show up in
+                # a field called ``prompt`` in the input dict. The recommended setting is True.
+                prompt_from_task=True,
+            ),
+            extra_delta_transform=True,
+        ),
+        # Here you define which pre-trained checkpoint you want to load to initialize the model.
+        # This should match the model config you chose above -- i.e. in this case we use the pi0 base model.
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/user/hsong425/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"),
+        pytorch_weight_path='/data/user/wsong890/lifuhao/openpi-main/checkpoints/pytorch_pi0_base',
+        # Below you can define other hyperparameters like the learning rate, number of training steps, etc.
+        # Check the base TrainConfig class for a full list of available hyperparameters.
+        num_train_steps=30_000,
+        save_interval=30000,
+        # Below is Spatial Forcing configs
+        vggt_weight_path='/data/user/wsong890/lifuhao/openpi-main/checkpoints/vggt',
+        vla_layers_align=12,
+        vggt_layers_align=-1,
+        pooling_func='bilinear',
+        use_vggt_pe=True,
+        use_vlm_norm=True,
+        align_loss_coeff=0.5,
+        #
+    ),
+    TrainConfig(
+        # Change the name to reflect your model and dataset.
         name="pi0_libero",
         # Here you define the model config -- In this example we use pi0 as the model
         # architecture and perform *full* finetuning. in the examples below we show how to modify
@@ -812,6 +850,94 @@ _CONFIGS = [
         ema_decay=None,
         wandb_enabled=False,
     ),
+    TrainConfig(
+        name="torch_pi0_aloha_place_any_floor_block",
+        model=pi0_config.Pi0Config(),
+        data=LeRobotAlohaDataConfig(
+            repo_id="real_world_dataset/place_any_floor_block",  # your datasets repo_id
+            # assets=AssetsConfig(
+            #     assets_dir="/data/user/hsong425/.cache/openpi/openpi-assets/checkpoints/pi0_base/assets",
+            #     asset_id="trossen",
+            # ),
+            default_prompt="place the block",
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left_wrist": "observation.images.cam_left_wrist",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/user/hsong425/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"),
+        pytorch_weight_path='/data/user/wsong890/lifuhao/openpi-main/checkpoints/pytorch_pi0_base',
+        #
+        vggt_weight_path='/data/user/wsong890/lifuhao/openpi-main/checkpoints/vggt',
+        vla_layers_align=12,
+        vggt_layers_align=-1,
+        pooling_func='bilinear',
+        use_vggt_pe=True,
+        use_vlm_norm=True,
+        align_loss_coeff=0.5,
+        #
+        num_train_steps=30_000,
+        batch_size=32,
+        save_interval=10_000,
+        ema_decay=None,
+        wandb_enabled=False,
+        num_workers=0,
+    ),
+    TrainConfig(
+        name="torch_pi05_aloha_place_any_floor_block",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotAlohaDataConfig(
+            repo_id="real_world_dataset/place_any_floor_block",  # your datasets repo_id
+            # assets=AssetsConfig(
+            #     assets_dir="/data/user/hsong425/.cache/openpi/openpi-assets/checkpoints/pi0_base/assets",
+            #     asset_id="trossen",
+            # ),
+            default_prompt="place the block",
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left_wrist": "observation.images.cam_left_wrist",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/user/wzhang834/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path='/data/user/wsong890/lifuhao/openpi-main/checkpoints/pytorch_pi05_base',
+        #
+        vggt_weight_path='/data/user/wsong890/lifuhao/openpi-main/checkpoints/vggt',
+        vla_layers_align=12,
+        vggt_layers_align=-1,
+        pooling_func='bilinear',
+        use_vggt_pe=True,
+        use_vlm_norm=True,
+        align_loss_coeff=0.5,
+        #
+        num_train_steps=30_000,
+        batch_size=64,
+        save_interval=10_000,
+        ema_decay=None,
+        wandb_enabled=False,
+        num_workers=0,
+    ),
     #
     # This is a test config that is used to illustate how train on a custom LeRobot dataset.
     # For instuctions on how to convert and train on your own Aloha dataset see examples/aloha_real/README.md
@@ -845,6 +971,50 @@ _CONFIGS = [
         num_train_steps=20_000,
     ),
     TrainConfig(
+        name="torch_pi0_aloha_memer",
+        model=pi0_config.Pi0Config(),
+        data=LeRobotAlohaDataConfig(
+            repo_id="/data/user/hlei573/.cache/huggingface/lerobot/hlei573/cobot_multi_task_merged",
+            
+            base_config=DataConfig(
+                  # Set to True for local-only datasets.
+                prompt_from_task=True,  # Set to True for prompt by task_name
+            ),
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left_wrist": "observation.images.cam_left_wrist",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "prompt",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/data/user/hsong425/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"
+        ),
+        pytorch_weight_path='/data/user/wsong890/lifuhao/openpi-main/checkpoints/pytorch_pi0_base',
+        vggt_weight_path='/data/user/wsong890/lifuhao/openpi-main/checkpoints/vggt',
+        vla_layers_align=12,
+        vggt_layers_align=-1,
+        pooling_func='bilinear',
+        use_vggt_pe=True,
+        use_vlm_norm=True,
+        align_loss_coeff=0.5,
+        num_train_steps=80_000,
+        batch_size=16,
+        save_interval=20_000,
+        ema_decay=None,
+        wandb_enabled=False,
+    ),
+    TrainConfig(
         name="pi05_aloha_pen_uncap",
         model=pi0_config.Pi0Config(pi05=True),
         data=LeRobotAlohaDataConfig(
@@ -873,6 +1043,50 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=20_000,
         batch_size=64,
+    ),
+    TrainConfig(
+        name="torch_pi0_robotwin_beat_block_hammer",
+        model=pi0_config.Pi0Config(),
+        data=LeRobotAlohaDataConfig(
+            repo_id="beat_block_hammer-clean-50",
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left_wrist": "observation.images.cam_left_wrist",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "prompt",
+                        }
+                    )
+                ]
+            ),
+            base_config=DataConfig(
+                prompt_from_task=True,  # Set to True for prompt by task_name        
+                ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/data/user/hsong425/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"),
+        pytorch_weight_path='/data/user/wsong890/lifuhao/openpi-main/checkpoints/pytorch_pi0_base',
+        #
+        vggt_weight_path='/data/user/wsong890/lifuhao/openpi-main/checkpoints/vggt',
+        vla_layers_align=12,
+        vggt_layers_align=-1,
+        pooling_func='bilinear',
+        use_vggt_pe=True,
+        use_vlm_norm=True,
+        align_loss_coeff=0.5,
+        #
+        num_train_steps=15_000,
+        batch_size=32,
+        save_interval=5_000,
+        ema_decay=None,
+        wandb_enabled=False,
+        num_workers=0,
     ),
     #
     # Fine-tuning DROID configs.

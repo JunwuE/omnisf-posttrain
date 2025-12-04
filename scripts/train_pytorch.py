@@ -46,6 +46,7 @@ import openpi.shared.normalize as _normalize
 import openpi.training.config as _config
 import openpi.training.data_loader as _data
 
+os.environ["WANDB_MODE"]="offline"
 
 def init_logging():
     level_mapping = {"DEBUG": "D", "INFO": "I", "WARNING": "W", "ERROR": "E", "CRITICAL": "C"}
@@ -87,6 +88,7 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, enabled: bool = T
             name=config.exp_name,
             config=dataclasses.asdict(config),
             project=config.project_name,
+            id=": ".join([config.name, config.exp_name]),
         )
         (ckpt_dir / "wandb_id.txt").write_text(wandb.run.id)
 
