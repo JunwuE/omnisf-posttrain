@@ -561,7 +561,7 @@ def train_loop(config: _config.TrainConfig):
             if is_main:
                 infos.append(
                     {
-                        "loss": loss.item(),
+                        "action_loss": loss.item(),
                         "learning_rate": optim.param_groups[0]["lr"],
                         "grad_norm": float(grad_norm) if isinstance(grad_norm, torch.Tensor) else grad_norm,
                     }
@@ -571,7 +571,7 @@ def train_loop(config: _config.TrainConfig):
                 elapsed = time.time() - start_time
 
                 # Average stats over log interval
-                avg_loss = sum(info["loss"] for info in infos) / len(infos)
+                avg_loss = sum(info["action_loss"] for info in infos) / len(infos)
                 avg_lr = sum(info["learning_rate"] for info in infos) / len(infos)
 
                 avg_grad_norm = None
@@ -582,15 +582,15 @@ def train_loop(config: _config.TrainConfig):
                     if len(vals) > 0:
                         avg_grad_norm = sum(vals) / len(vals)
                 logging.info(
-                    f"step={global_step} loss={avg_loss:.4f} lr={avg_lr:.2e} grad_norm={avg_grad_norm:.2f} time={elapsed:.1f}s"
+                    f"step={global_step} action_loss={avg_loss:.4f} lr={avg_lr:.2e} grad_norm={avg_grad_norm:.2f} time={elapsed:.1f}s"
                     if avg_grad_norm is not None
-                    else f"step={global_step} loss={avg_loss:.4f} lr={avg_lr:.2e} time={elapsed:.1f}s"
+                    else f"step={global_step} action_loss={avg_loss:.4f} lr={avg_lr:.2e} time={elapsed:.1f}s"
                 )
 
                 # Log to wandb
                 if config.wandb_enabled and len(infos) > 0:
                     log_payload = {
-                        "loss": avg_loss,
+                        "action_loss": avg_loss,
                         "learning_rate": avg_lr,
                         "step": global_step,
                         "time_per_step": elapsed / config.log_interval,
@@ -610,7 +610,7 @@ def train_loop(config: _config.TrainConfig):
             if pbar is not None:
                 pbar.update(1)
                 pbar.set_postfix(
-                    {"loss": f"{loss.item():.4f}", "lr": f"{optim.param_groups[0]['lr']:.2e}", "step": global_step}
+                    {"action_loss": f"{loss.item():.4f}", "lr": f"{optim.param_groups[0]['lr']:.2e}", "step": global_step}
                 )
 
     # Close progress bar
