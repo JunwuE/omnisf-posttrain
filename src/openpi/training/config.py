@@ -478,7 +478,9 @@ class TrainConfig:
     vggt_dim: int = 1024
 
     vla_layers_align: int | None = None  # total 18 for paligemma-2b
+    vla_adapt_layers_align: bool | None = None
     vggt_layers_align: int | None = None  # total 24 for VGGT
+    vggt_adapt_layers_align: bool | None = None
 
     pooling_func: str | None = None
     use_vggt_pe: bool | None = None
@@ -683,7 +685,9 @@ _CONFIGS = [
         # Below is Spatial Forcing configs
         vggt_weight_path='/data/user/wsong890/lifuhao/openpi-main/checkpoints/vggt',
         vla_layers_align=12,
+        vla_adapt_layers_align=False,
         vggt_layers_align=-1,
+        vggt_adapt_layers_align=False,
         pooling_func='bilinear',
         use_vggt_pe=True,
         use_vlm_norm=True,
@@ -722,7 +726,9 @@ _CONFIGS = [
         # Below is Spatial Forcing configs
         vggt_weight_path='/data/user/wsong890/lifuhao/openpi-main/checkpoints/vggt',
         vla_layers_align=12,
+        vla_adapt_layers_align=False,
         vggt_layers_align=-1,
+        vggt_adapt_layers_align=False,
         pooling_func='bilinear',
         use_vggt_pe=True,
         use_vlm_norm=True,

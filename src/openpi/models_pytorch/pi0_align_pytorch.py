@@ -397,27 +397,36 @@ class PI0Pytorch(nn.Module):
         # =================================== Alignment loss ===================================
 
         # VLA hidden states
-        (prefix_hidden, _) = all_hidden_states[self.vla_layers_align]  # 18 total layers of paligemma
-        vision_hidden = prefix_hidden[:, :img_len, :]
+        vision_hidden = [hid[:, :img_len, :].clone() for (hid, _) in all_hidden_states]
 
         # VGGT hidden states
         with torch.autocast("cuda", dtype=torch.bfloat16), torch.no_grad():
             vggt_output = vggt(img_resize_wo_aug)
-        agg_vggt_hidden = vggt_output["features"][self.vggt_layers_align]  # 24 for total layers of VGGT
+        agg_vggt_hidden = vggt_output["features"]
         patch_start_idx = vggt_output["patch_start_idx"]
         original_img = vggt_output["images"]
-        vggt_hidden = agg_vggt_hidden[:, :, patch_start_idx:, :]
+        # from torchvision.utils import save_image
+        # save_image(original_img[0,0], 'image.png')
+        vggt_hidden = [hid[:, :, patch_start_idx:, :] for hid in agg_vggt_hidden]
 
         # Resample VGGT hidden states to match the resolution of VLA hidden states
         H, W = original_img.shape[-2:]
         patch_h, patch_w = H // vggt.patch_size, W // vggt.patch_size
-        vggt_hidden = custom_pooling(
-            vggt_hidden, (patch_h, patch_w), (H, W), vision_hidden, self.pooling_func, self.use_vggt_pe
-        )
+        vggt_hidden = [
+            custom_pooling(
+                hid, (patch_h, patch_w), (H, W), vision_hidden[0], self.pooling_func, self.use_vggt_pe
+            )
+            for hid in vggt_hidden
+        ]
+
+        # empty image feature masks for alignment loss
+        tokens_per_img = img_len // len(images)
+        img_masks_stack = torch.stack(img_masks, dim=1)
+        align_mask = torch.repeat_interleave(img_masks_stack, repeats=tokens_per_img, dim=1)
 
         # calculate align loss
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            align_loss = align_proj(vision_hidden, vggt_hidden)
+            align_loss = align_proj(vision_hidden, vggt_hidden, align_mask)
 
         return action_loss, align_loss
 

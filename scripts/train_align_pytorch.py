@@ -50,13 +50,13 @@ from vggt.models.vggt import VGGT
 
 os.environ["WANDB_MODE"]="offline"
 
-import debugpy
-try:
-    debugpy.listen(("localhost", 9501))
-    print("Waiting for debugger attach")
-    debugpy.wait_for_client()
-except Exception as e:
-    pass
+# import debugpy
+# try:
+#     debugpy.listen(("localhost", 9501))
+#     print("Waiting for debugger attach")
+#     debugpy.wait_for_client()
+# except Exception as e:
+#     pass
 
 
 def init_logging():
@@ -429,8 +429,8 @@ def train_loop(config: _config.TrainConfig):
     ).to(device)
     align_projector = projectors.AlignProjector(
         model.LLM_width,
-        config.vggt_dim,
-        config.use_vlm_norm).to(device)
+        config,
+    ).to(device)
 
     if hasattr(model, "gradient_checkpointing_enable"):
         enable_gradient_checkpointing = True
