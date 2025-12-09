@@ -40,8 +40,9 @@ dependencies = [
     "gradio==5.17.1",
     "viser==0.2.23",
     "hydra-core",
-    "onnxruntime"
     # "rerun-sdk",
+    "onnxruntime",
+    "rerun-sdk",
 ]
 
 
@@ -70,8 +71,8 @@ override-dependencies = ["datasets==3.6.0", "ml-dtypes==0.4.1", "tensorstore==0.
 
 [tool.uv.sources]
 openpi-client = { workspace = true }
-lerobot = { git = "https://github.com/huggingface/lerobot", rev = "0cf864870cf29f4738d3ade893e6fd13fbd7cdb5" }
-dlimp = { git = "https://github.com/kvablack/dlimp", rev = "ad72ce3a9b414db2185bc0b38461d4101a65477a" }
+lerobot = { path = "/data/user/wsong890/lifuhao/install_pkg/lerobot-0cf864870cf29f4738d3ade893e6fd13fbd7cdb5", editable = true }
+dlimp = { path = "/data/user/wsong890/lifuhao/install_pkg/dlimp-ad72ce3a9b414db2185bc0b38461d4101a65477a" }
 rerun-sdk = { path = "/data/user/wsong890/lifuhao/install_pkg/rerun_sdk-0.25.0a1+dev-cp39-abi3-manylinux_2_28_x86_64.whl" }
 
 [tool.uv.workspace]

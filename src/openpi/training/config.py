@@ -7,6 +7,8 @@ import difflib
 import logging
 import pathlib
 from typing import Any, Literal, Protocol, TypeAlias
+import importlib.util
+import sys
 
 import etils.epath as epath
 import flax.nnx as nnx
@@ -1279,6 +1281,53 @@ _CONFIGS = [
     #
     *roboarena_config.get_roboarena_configs(),
 ]
+
+def load_external_configs(directory_path: str) -> list[TrainConfig]:
+    external_configs = []
+    path = pathlib.Path(directory_path)
+
+    if not path.exists():
+        logging.warning(f"External config path '{path}' does not exist. Skipping.")
+        return []
+
+    print(f"Loading external configs from: {path}")
+
+    for file_path in path.glob("*.py"):
+        if file_path.name == "__init__.py":
+            continue
+
+        try:
+            module_name = file_path.stem
+            spec = importlib.util.spec_from_file_location(module_name, file_path)
+            if spec and spec.loader:
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_name] = module 
+                spec.loader.exec_module(module)
+
+                found_in_file = 0
+                for attr_name in dir(module):
+                    attr = getattr(module, attr_name)
+                    
+                    if isinstance(attr, TrainConfig):
+                        external_configs.append(attr)
+                        found_in_file += 1
+                    
+                    elif isinstance(attr, list) and attr:
+                        if all(isinstance(item, TrainConfig) for item in attr):
+                            external_configs.extend(attr)
+                            found_in_file += len(attr)
+                            
+                logging.info(f"Loaded {found_in_file} configs from {file_path.name}")
+                
+        except Exception as e:
+            logging.error(f"Failed to load config from {file_path}: {e}")
+            import traceback
+            traceback.print_exc()
+
+    return external_configs
+
+EXTERNAL_CONFIG_DIR = "src/openpi/external_config"
+_CONFIGS.extend(load_external_configs(EXTERNAL_CONFIG_DIR))
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
     raise ValueError("Config names must be unique.")

@@ -99,7 +99,7 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, enabled: bool = T
             name=config.exp_name,
             config=dataclasses.asdict(config),
             project=config.project_name,
-            id=": ".join([config.name, config.exp_name]),
+            id="-".join([config.name, config.exp_name]),
         )
         (ckpt_dir / "wandb_id.txt").write_text(wandb.run.id)
 
