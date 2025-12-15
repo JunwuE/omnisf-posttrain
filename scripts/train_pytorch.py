@@ -85,7 +85,7 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, enabled: bool = T
         wandb.init(id=run_id, resume="must", project=config.project_name)
     else:
         wandb.init(
-            name=config.exp_name,
+            name=config.name,
             config=dataclasses.asdict(config),
             project=config.project_name,
             id="-".join([config.name, config.exp_name]),

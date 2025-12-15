@@ -1019,7 +1019,7 @@ _CONFIGS = [
         num_train_steps=20_000,
     ),
     TrainConfig(
-        name="torch_pi0_aloha_memer",
+        name="torch_pi0_aloha_train_pytorch",
         model=pi0_config.Pi0Config(),
         data=LeRobotAlohaDataConfig(
             repo_id="/data/user/hlei573/.cache/huggingface/lerobot/hlei573/cobot_multi_task_merged",
@@ -1326,7 +1326,7 @@ def load_external_configs(directory_path: str) -> list[TrainConfig]:
 
     return external_configs
 
-EXTERNAL_CONFIG_DIR = "src/openpi/external_config"
+EXTERNAL_CONFIG_DIR = "/data/user/wsong890/lifuhao/openpi-main/src/openpi/external_config"
 _CONFIGS.extend(load_external_configs(EXTERNAL_CONFIG_DIR))
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
