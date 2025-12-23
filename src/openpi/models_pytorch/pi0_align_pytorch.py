@@ -426,7 +426,7 @@ class PI0Pytorch(nn.Module):
 
         # calculate align loss
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            align_loss = align_proj(vision_hidden, vggt_hidden, align_mask)
+            align_loss = align_proj(vision_hidden, vggt_hidden, align_mask, (len(images), H, W))
 
         return action_loss, align_loss
 

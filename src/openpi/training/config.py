@@ -489,6 +489,8 @@ class TrainConfig:
     use_vlm_norm: bool | None = None
 
     align_loss_coeff: float = 0.0
+    iSF_conv: bool = False
+    iSF_zscore: bool = False
 
     # Precision for PyTorch training.
     pytorch_training_precision: Literal["bfloat16", "float32"] = "bfloat16"
