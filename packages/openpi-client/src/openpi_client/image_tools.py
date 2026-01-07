@@ -12,7 +12,7 @@ def convert_to_uint8(img: np.ndarray) -> np.ndarray:
     return img
 
 
-def resize_with_pad(images: np.ndarray, height: int, width: int, method=Image.BILINEAR) -> np.ndarray:
+def resize_with_pad(images: np.ndarray, height: int, width: int, method=Image.BILINEAR, return_mask=False) -> np.ndarray:
     """Replicates tf.image.resize_with_pad for multiple images using PIL. Resizes a batch of images to a target height.
 
     Args:
@@ -26,6 +26,9 @@ def resize_with_pad(images: np.ndarray, height: int, width: int, method=Image.BI
     """
     # If the images are already the correct size, return them as is.
     if images.shape[-3:-1] == (height, width):
+        if return_mask:
+            img_padding_mask = np.ones((*images.shape[:-3], height, width), dtype=bool)
+            return images, img_padding_mask
         return images
 
     original_shape = images.shape
@@ -39,10 +42,13 @@ def resize_with_pad(images: np.ndarray, height: int, width: int, method=Image.BI
     resized_images = np.stack(resized_images)
     img_padding_mask = np.stack(img_padding_mask)
 
-    return (
-        resized_images.reshape(*original_shape[:-3], *resized_images.shape[-3:]), 
-        img_padding_mask.reshape(*original_shape[:-3], *img_padding_mask.shape[-2:]),
-    )
+    if return_mask:
+        return (
+            resized_images.reshape(*original_shape[:-3], *resized_images.shape[-3:]), 
+            img_padding_mask.reshape(*original_shape[:-3], *img_padding_mask.shape[-2:]),
+        )
+    else:
+        return resized_images.reshape(*original_shape[:-3], *resized_images.shape[-3:])
 
 def _resize_with_pad_pil(image: Image.Image, height: int, width: int, method: int) -> Image.Image:
     """Replicates tf.image.resize_with_pad for one image using PIL. Resizes an image to a target height and

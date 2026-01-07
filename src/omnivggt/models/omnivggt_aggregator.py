@@ -128,12 +128,12 @@ class ZeroAggregator(Aggregator):
         return norm.unsqueeze(-1)
     
     def forward(self, images: torch.Tensor, 
-                extrinsics: torch.Tensor, 
-                intrinsics: torch.Tensor,
-                depth: torch.Tensor,
-                mask: torch.Tensor,
-                depth_gt_index: List[int],
-                camera_gt_index: List[int]) -> Tuple[List[torch.Tensor], int]:
+                extrinsics: torch.Tensor = None, 
+                intrinsics: torch.Tensor = None,
+                depth: torch.Tensor = None,
+                mask: torch.Tensor = None,
+                depth_gt_index: List[int] = [],
+                camera_gt_index: List[int] = []) -> Tuple[List[torch.Tensor], int]:
         B, S, C_in, H, W = images.shape
         
         if C_in != 3:
@@ -157,7 +157,7 @@ class ZeroAggregator(Aggregator):
         
         if len(camera_gt_index) != 0:
             camera_gt_length = len(camera_gt_index)
-            camera_idx_tensor = torch.tensor(camera_gt_index, device=depth.device)
+            camera_idx_tensor = torch.tensor(camera_gt_index, device=images.device)
 
             extrinsics_selected = torch.index_select(extrinsics, dim=1, index=camera_idx_tensor)
             intrinsics_selected = torch.index_select(intrinsics, dim=1, index=camera_idx_tensor)
@@ -171,7 +171,7 @@ class ZeroAggregator(Aggregator):
             )
             gt_camera_token = self.pose_embeddings[0](pose_encoding).view(B * camera_gt_length, C).unsqueeze(1)
             
-            device = depth.device
+            device = images.device
             camera_full = torch.zeros(K, 1, C, device=device, dtype=camera_token.dtype)
 
             camera_rows = (torch.arange(B, device=device).unsqueeze(1) * S + camera_idx_tensor.unsqueeze(0)).reshape(-1)
@@ -179,12 +179,12 @@ class ZeroAggregator(Aggregator):
             gt_camera_token = camera_full
         else:
             pose_encoding = None
-            gt_camera_token = torch.zeros(K, 1, C, device=depth.device, dtype=camera_token.dtype)
+            gt_camera_token = torch.zeros(K, 1, C, device=images.device, dtype=camera_token.dtype)
 
 
         if len(depth_gt_index) != 0:
             depth_gt_length = len(depth_gt_index)
-            idx_tensor = torch.tensor(depth_gt_index, device=depth.device)
+            idx_tensor = torch.tensor(depth_gt_index, device=images.device)
 
             depth_selected = torch.index_select(depth, dim=1, index=idx_tensor)
             mask_selected = torch.index_select(mask, dim=1, index=idx_tensor)
@@ -198,7 +198,7 @@ class ZeroAggregator(Aggregator):
             depthmaps = self._match_dtype(depthmaps, self.depth_patch_embed.proj.weight)
             gt_depth_token = self.depth_patch_embed(depthmaps)
             
-            device = depth.device
+            device = images.device
             depth_full  = self.depth_placeholder.expand(K, P, C).clone()
 
             rows = (torch.arange(B, device=device).unsqueeze(1) * S + idx_tensor.unsqueeze(0)).reshape(-1)

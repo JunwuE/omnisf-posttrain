@@ -124,6 +124,7 @@ class PI0Pytorch(nn.Module):
         self.vggt_layers_align = extra_config.vggt_layers_align
         self.pooling_func = extra_config.pooling_func
         self.use_vggt_pe = extra_config.use_vggt_pe
+        self.use_camera_params = extra_config.use_camera_params
         self.ignore_img_padding_area = extra_config.ignore_img_padding_area
 
         msg = "transformers_replace is not installed correctly. Please install it with `uv pip install transformers==4.53.2` and `cp -r ./src/openpi/models_pytorch/transformers_replace/* .venv/lib/python3.11/site-packages/transformers/`."
@@ -181,6 +182,9 @@ class PI0Pytorch(nn.Module):
             observation.tokenized_prompt,
             observation.tokenized_prompt_mask,
             observation.state,
+            observation.extrinsics,
+            observation.intrinsics,
+            observation.camera_param_mask,
         )
 
     def sample_noise(self, shape, device):
@@ -405,7 +409,15 @@ class PI0Pytorch(nn.Module):
 
         # VGGT hidden states
         with torch.autocast("cuda", dtype=torch.bfloat16), torch.no_grad():
-            vggt_output = vggt(img_resize_wo_aug)
+            if self.use_camera_params:
+                vggt_output = vggt(
+                    images=img_resize_wo_aug,
+                    extrinsics=extrinsics,
+                    intrinsics=intrinsics,
+                    camera_gt_index=camera_param_mask,
+                )
+            else:
+                vggt_output = vggt(img_resize_wo_aug)
         agg_vggt_hidden = vggt_output["features"]
         patch_start_idx = vggt_output["patch_start_idx"]
         original_img = vggt_output["images"]

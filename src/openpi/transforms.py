@@ -6,7 +6,7 @@ from typing import Protocol, TypeAlias, TypeVar, runtime_checkable
 import flax.traverse_util as traverse_util
 import jax
 import numpy as np
-from openpi_client import image_tools
+from openpi_client import image_tools, image_tools_omni
 
 from openpi.models import tokenizer as _tokenizer
 from openpi.shared import array_typing as at
@@ -203,7 +203,9 @@ class ResizeImages(DataTransformFn):
             for cam in data["image"]:
                 resized_img, img_padding_mask = image_tools.resize_with_pad(
                     data["image"][cam], 
-                    self.height, self.width
+                    self.height, 
+                    self.width,
+                    return_mask=True
                 )
                 data["image"][cam] = resized_img
                 data["image_padding_mask"][cam] = img_padding_mask

@@ -456,6 +456,55 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotOmniDROIDDataConfig(DataConfigFactory):
+    """
+    This dataclass is based on LeRobotDROIDDataConfig.
+    We additionally add camera extrinsics and intrinsics to the repack transform,
+    which are required for Omni-Spatial-Forcing (i.e., OmniVGGT forward process).
+    !!! Note: It is only used when training, but not used during inference !!!
+    """
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/exterior_image_1_left": "observation.images.exterior_1_left",
+                        "observation/exterior_image_2_left": "observation.images.exterior_2_left",
+                        "observation/wrist_image_left": "observation.images.wrist_left",
+                        "observation/joint_position": "action.joint_position",
+                        "observation/gripper_position": "observation.state.gripper_position",
+                        "extrinsics/exterior_image_1_left": "camera_extrinsics.exterior_1_left",
+                        "extrinsics/exterior_image_2_left": "camera_extrinsics.exterior_2_left",
+                        "intrinsics/exterior_image_1_left": "camera_intrinsics.exterior_1_left",
+                        "intrinsics/exterior_image_2_left": "camera_intrinsics.exterior_2_left",
+                        "file_record_path": "file_record_path",
+                        "actions": "action",
+                        "prompt": "prompt",
+                        "language_instruction": "language_instruction",
+                        "language_instruction_2": "language_instruction_2",
+                        "language_instruction_3": "language_instruction_3",
+                    }
+                )
+            ]
+        )
+        # We assume joint *velocity* actions, so we should *not* apply an additional delta transform.
+        data_transforms = _transforms.Group(
+            inputs=[droid_policy.OmniDroidInputs(model_type=model_config.model_type)],
+            outputs=[droid_policy.DroidOutputs()],
+        )
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
     name: tyro.conf.Suppress[str]
@@ -487,6 +536,7 @@ class TrainConfig:
     pooling_func: str | None = None
     use_vggt_pe: bool | None = None
     use_vlm_norm: bool | None = None
+    use_camera_params: bool | None = None
     ignore_img_padding_area: bool | None = True
 
     align_loss_coeff: float = 0.0

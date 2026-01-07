@@ -8,14 +8,17 @@ from omnivggt.heads.dpt_head import DPTHead
 
 
 class OmniVGGT(nn.Module, PyTorchModelHubMixin):
-    def __init__(self, img_size=518, patch_size=14, embed_dim=1024):
+    def __init__(self, img_size=518, patch_size=14, embed_dim=1024,
+                 enable_camera=True, enable_point=True, enable_depth=True, feature_only=False):
         super().__init__()
 
         self.aggregator = ZeroAggregator(img_size=img_size, patch_size=patch_size, embed_dim=embed_dim, pose_hidden_dim = 9)
-        self.camera_head = CameraHead(dim_in=2 * embed_dim)
-        self.point_head = DPTHead(dim_in=2 * embed_dim, output_dim=4, activation="inv_log", conf_activation="expp1")
-        self.depth_head = DPTHead(dim_in=2 * embed_dim, output_dim=2, activation="exp", conf_activation="expp1")
-    
+        self.camera_head = CameraHead(dim_in=2 * embed_dim) if enable_camera else None
+        self.point_head = DPTHead(dim_in=2 * embed_dim, output_dim=4, activation="inv_log", conf_activation="expp1") if enable_point else None
+        self.depth_head = DPTHead(dim_in=2 * embed_dim, output_dim=2, activation="exp", conf_activation="expp1") if enable_depth else None
+        self.feature_only = feature_only
+        self.embed_dim = embed_dim
+        self.patch_size = patch_size
     
     def forward(self,
         images: torch.Tensor,
@@ -23,8 +26,8 @@ class OmniVGGT(nn.Module, PyTorchModelHubMixin):
         intrinsics: torch.Tensor = None,
         depth: torch.Tensor = None,
         mask: torch.Tensor = None,
-        depth_gt_index: list = None,
-        camera_gt_index: list = None,
+        depth_gt_index: list = [],
+        camera_gt_index: list = [],
     ):
         
         # If without batch dimension, add it
@@ -62,7 +65,10 @@ class OmniVGGT(nn.Module, PyTorchModelHubMixin):
                 predictions["world_points"] = pts3d
                 predictions["world_points_conf"] = pts3d_conf
 
-
+        if self.feature_only:
+            predictions["features"] = aggregated_tokens_list
+            predictions['patch_start_idx'] = patch_start_idx
+            
         predictions["images"] = images  # store the images for visualization during inference
 
         return predictions

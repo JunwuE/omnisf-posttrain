@@ -167,6 +167,17 @@ def preprocess_observation_pytorch(
     # obtain image padding mask for non-rectangular images
     img_padding_mask = {key: observation.image_padding_mask[key] for key in out_images}       
 
+    # obtain camera params and masks if available
+    if observation.camera_param:
+        extrinsics = torch.stack([observation.camera_param[k + "_extrinsics"] for k in out_images], dim=1)
+        intrinsics = torch.stack([observation.camera_param[k + "_intrinsics"] for k in out_images], dim=1)
+        camera_param_mask = [
+            i for i, k in enumerate(out_images)
+            if k in observation.image_masks and observation.camera_param_mask[k].all()
+        ]
+    else:
+        extrinsics, intrinsics, camera_param_mask = None, None, None
+
     # Create a simple object with the required attributes instead of using the complex Observation class
     class SimpleProcessedObservation:
         def __init__(self, **kwargs):
@@ -182,6 +193,9 @@ def preprocess_observation_pytorch(
         "tokenized_prompt_mask": observation.tokenized_prompt_mask,
         "token_ar_mask": observation.token_ar_mask,
         "token_loss_mask": observation.token_loss_mask,
+        "extrinsics": extrinsics,
+        "intrinsics": intrinsics,
+        "camera_param_mask": camera_param_mask,
     }
 
     if get_wo_aug:
