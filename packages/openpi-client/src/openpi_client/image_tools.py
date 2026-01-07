@@ -64,4 +64,8 @@ def _resize_with_pad_pil(image: Image.Image, height: int, width: int, method: in
     pad_width = max(0, int((width - resized_width) / 2))
     zero_image.paste(resized_image, (pad_width, pad_height))
     assert zero_image.size == (width, height)
-    return zero_image
+
+    img_padding_mask = np.zeros((height, width), dtype=bool)
+    img_padding_mask[pad_height:pad_height+resized_height, pad_width:pad_width+resized_width] = True
+
+    return zero_image, img_padding_mask
