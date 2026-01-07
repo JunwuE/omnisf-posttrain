@@ -181,6 +181,10 @@ def replace_padding_0to1_torch(image: torch.Tensor,) -> torch.Tensor:
         one_t = torch.tensor(1, dtype=image.dtype, device=device)
         image = torch.where(mask_exp, one_t, image)
 
+    # Handle all-zero value images
+    if (image == 0).all():
+        image = torch.ones_like(image)
+
     if single:
         image = image.squeeze(0)
     return image

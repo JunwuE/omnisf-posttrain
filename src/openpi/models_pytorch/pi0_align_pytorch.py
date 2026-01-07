@@ -124,6 +124,7 @@ class PI0Pytorch(nn.Module):
         self.vggt_layers_align = extra_config.vggt_layers_align
         self.pooling_func = extra_config.pooling_func
         self.use_vggt_pe = extra_config.use_vggt_pe
+        self.ignore_img_padding_area = extra_config.ignore_img_padding_area
 
         msg = "transformers_replace is not installed correctly. Please install it with `uv pip install transformers==4.53.2` and `cp -r ./src/openpi/models_pytorch/transformers_replace/* .venv/lib/python3.11/site-packages/transformers/`."
         try:
@@ -175,6 +176,7 @@ class PI0Pytorch(nn.Module):
         return (
             list(observation.images.values()),
             list(observation.img_wo_aug.values()) if get_wo_aug else None,
+            list(observation.image_padding_mask.values()),
             list(observation.image_masks.values()),
             observation.tokenized_prompt,
             observation.tokenized_prompt_mask,
@@ -329,9 +331,11 @@ class PI0Pytorch(nn.Module):
 
     def forward(self, observation, actions, vggt, align_proj, noise=None, time=None) -> Tensor:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
-        images, img_wo_aug, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(
-            observation, train=True, get_wo_aug=True
-        )
+        (
+            images, img_wo_aug, img_padding_mask, img_masks, 
+            lang_tokens, lang_masks, state, 
+            extrinsics, intrinsics, camera_param_mask,
+        ) = self._preprocess_observation(observation, train=True, get_wo_aug=True)
         img_resize_wo_aug = preprocess_images_from_openpi(img_wo_aug)  # specific for VGGT with 518px input
 
         # =================================== VLA action loss ===================================
@@ -405,7 +409,7 @@ class PI0Pytorch(nn.Module):
         agg_vggt_hidden = vggt_output["features"]
         patch_start_idx = vggt_output["patch_start_idx"]
         original_img = vggt_output["images"]
-        # from torchvision.utils import save_image
+        # from torchvision.utils import save_image; import matplotlib.cm as cm; import numpy as np; from PIL import Image
         # save_image(original_img[0,0], 'image.png')
         vggt_hidden = [hid[:, :, patch_start_idx:, :] for hid in agg_vggt_hidden]
 
@@ -424,6 +428,19 @@ class PI0Pytorch(nn.Module):
         img_masks_stack = torch.stack(img_masks, dim=1)
         align_mask = torch.repeat_interleave(img_masks_stack, repeats=tokens_per_img, dim=1)
 
+        # useless image padding feature masks for alignment loss
+        if self.ignore_img_padding_area:
+            img_padding_mask = torch.stack(img_padding_mask, dim=1)
+            target_size = img_padding_mask.shape[-1] // 14  # 224/14, where 14 is the patch size of Gemma encoder
+            mask_downsampled = F.interpolate(
+                img_padding_mask.float(), 
+                size=(target_size, target_size), 
+                mode='nearest'
+            ).bool().flatten(start_dim=1)
+            assert align_mask.shape == mask_downsampled.shape, \
+                "align_mask shape don't match img_padding_mask shape, please manually modify the patch size of Gemma encoder (now is 14)"
+            align_mask = mask_downsampled & align_mask
+
         # calculate align loss
         with torch.autocast("cuda", dtype=torch.bfloat16):
             align_loss = align_proj(vision_hidden, vggt_hidden, align_mask, (len(images), H, W))
@@ -438,7 +455,7 @@ class PI0Pytorch(nn.Module):
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
             noise = self.sample_noise(actions_shape, device)
 
-        images, _, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=False)
+        images, _, _, img_masks, lang_tokens, lang_masks, state, _, _, _ = self._preprocess_observation(observation, train=False)
 
         prefix_embs, prefix_pad_masks, prefix_att_masks, _ = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)

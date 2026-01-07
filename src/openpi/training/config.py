@@ -487,6 +487,7 @@ class TrainConfig:
     pooling_func: str | None = None
     use_vggt_pe: bool | None = None
     use_vlm_norm: bool | None = None
+    ignore_img_padding_area: bool | None = True
 
     align_loss_coeff: float = 0.0
     iSF_conv: bool = False
