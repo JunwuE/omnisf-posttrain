@@ -113,6 +113,9 @@ class Observation(Generic[ArrayT]):
     # Camera parameter masks, a tuple with three elements for each images
     camera_param_mask: dict[str, at.Bool[ArrayT, "*b"]] | None = None
 
+    # The index of this frame in the original lerobot dataset sequence
+    index: at.Int[ArrayT, "*b"] | None = None
+
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
         """This method defines the mapping between unstructured data (i.e., nested dict) to the structured Observation format."""
@@ -136,6 +139,7 @@ class Observation(Generic[ArrayT]):
             token_loss_mask=data.get("token_loss_mask"),
             camera_param=data.get("camera_param"),
             camera_param_mask=data.get("camera_param_mask"),
+            index=data.get("index"),
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:

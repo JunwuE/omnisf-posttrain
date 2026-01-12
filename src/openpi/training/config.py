@@ -308,6 +308,7 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
                         "observation/state": "state",
                         "actions": "actions",
                         "prompt": "prompt",
+                        "index": "index",
                     }
                 )
             ]
@@ -538,6 +539,9 @@ class TrainConfig:
     use_vlm_norm: bool | None = None
     use_camera_params: bool | None = None
     ignore_img_padding_area: bool | None = True
+
+    save_SF_feature: str | None = None
+    load_SF_offline: str | None = None
 
     align_loss_coeff: float = 0.0
     iSF_conv: bool = False

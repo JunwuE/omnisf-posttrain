@@ -1,10 +1,13 @@
 import logging
 import math
+import os
 
 import torch
 from torch import Tensor
 from torch import nn
 import torch.nn.functional as F  # noqa: N812
+
+from concurrent.futures import ThreadPoolExecutor
 
 import openpi.models.gemma as _gemma
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
@@ -127,6 +130,21 @@ class PI0Pytorch(nn.Module):
         self.use_camera_params = extra_config.use_camera_params
         self.ignore_img_padding_area = extra_config.ignore_img_padding_area
 
+        # save and load SpatialForcing features offline
+        self.save_SF_feature = extra_config.save_SF_feature
+        self.load_SF_offline = extra_config.load_SF_offline
+        if self.save_SF_feature:
+            assert f"layer{self.vggt_layers_align}" in self.save_SF_feature, \
+                "The specified save_SF_feature must have the string of target vla layer, for example, '**/libero_vggt_layer-1/'."
+            os.makedirs(self.save_SF_feature, exist_ok=True)
+        if self.load_SF_offline:
+            assert os.path.exists(self.load_SF_offline)
+            assert f"layer{self.vggt_layers_align}" in self.load_SF_offline, \
+                "The specified VGGT layer index beween saved features and targets is inconsistant."
+        if self.save_SF_feature and self.load_SF_offline:
+            logging.warning("Both load_SF_offline and save_SF_feature are specified."
+                            " The saved features will be overwritten meaninglessly.")
+
         msg = "transformers_replace is not installed correctly. Please install it with `uv pip install transformers==4.53.2` and `cp -r ./src/openpi/models_pytorch/transformers_replace/* .venv/lib/python3.11/site-packages/transformers/`."
         try:
             from transformers.models.siglip import check
@@ -173,7 +191,12 @@ class PI0Pytorch(nn.Module):
 
     def _preprocess_observation(self, observation, *, train=True, get_wo_aug=False):
         """Helper method to preprocess observation."""
-        observation = _preprocessing.preprocess_observation_pytorch(observation, train=train, get_wo_aug=get_wo_aug)
+        observation = _preprocessing.preprocess_observation_pytorch(
+            observation, 
+            train=train, 
+            get_wo_aug=get_wo_aug,
+            get_wo_color_aug=bool(self.save_SF_feature or self.load_SF_offline),
+        )
         return (
             list(observation.images.values()),
             list(observation.img_wo_aug.values()) if get_wo_aug else None,
@@ -185,6 +208,7 @@ class PI0Pytorch(nn.Module):
             observation.extrinsics,
             observation.intrinsics,
             observation.camera_param_mask,
+            observation.index,
         )
 
     def sample_noise(self, shape, device):
@@ -333,14 +357,49 @@ class PI0Pytorch(nn.Module):
 
         return embs, pad_masks, att_masks, adarms_cond
 
+    def _load_single_vggt(self, idx, dtype):
+        load_path = os.path.join(self.load_SF_offline, f"{idx}.pt")
+        data = torch.load(load_path, map_location="cpu")
+        if data.dtype != dtype:
+            data = data.to(dtype)
+        return data
+
+    def _load_offline_features_worker(self, frame_index, dtype, device):
+        indices = frame_index.tolist() if isinstance(frame_index, torch.Tensor) else frame_index
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(lambda idx: self._load_single_vggt(idx, dtype), indices))
+
+        vggt_single_layer = torch.stack(results).to(device, non_blocking=True) # [bs, S, D]
+
+        vggt_all_layers = [None] * 24
+        vggt_all_layers[self.vggt_layers_align] = vggt_single_layer
+        return vggt_all_layers
+
     def forward(self, observation, actions, vggt, align_proj, noise=None, time=None) -> Tensor:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
         (
             images, img_wo_aug, img_padding_mask, img_masks, 
             lang_tokens, lang_masks, state, 
             extrinsics, intrinsics, camera_param_mask,
+            frame_index,
         ) = self._preprocess_observation(observation, train=True, get_wo_aug=True)
         img_resize_wo_aug = preprocess_images_from_openpi(img_wo_aug)  # specific for VGGT with 518px input
+
+        # ======================== Parallel loading VGGT features offline ========================
+
+        future_vggt = None
+        if self.load_SF_offline:
+            target_device = actions.device
+            target_dtype = actions.dtype  # TODO check
+            
+            executor = ThreadPoolExecutor(max_workers=1)
+            future_vggt = executor.submit(
+                self._load_offline_features_worker, 
+                frame_index.cpu().numpy(),
+                target_device, 
+                target_dtype
+            )
 
         # =================================== VLA action loss ===================================
 
@@ -408,32 +467,43 @@ class PI0Pytorch(nn.Module):
         vision_hidden = [hid[:, :img_len, :].clone() for (hid, _) in all_hidden_states]
 
         # VGGT hidden states
-        with torch.autocast("cuda", dtype=torch.bfloat16), torch.no_grad():
-            if self.use_camera_params:
-                vggt_output = vggt(
-                    images=img_resize_wo_aug,
-                    extrinsics=extrinsics,
-                    intrinsics=intrinsics,
-                    camera_gt_index=camera_param_mask,
-                )
-            else:
-                vggt_output = vggt(img_resize_wo_aug)
-        agg_vggt_hidden = vggt_output["features"]
-        patch_start_idx = vggt_output["patch_start_idx"]
-        original_img = vggt_output["images"]
-        # from torchvision.utils import save_image; import matplotlib.cm as cm; import numpy as np; from PIL import Image
-        # save_image(original_img[0,0], 'image.png')
-        vggt_hidden = [hid[:, :, patch_start_idx:, :] for hid in agg_vggt_hidden]
+        if self.load_SF_offline:
+            vggt_hidden = future_vggt.result()
+            executor.shutdown(wait=False)
+            H, W = img_resize_wo_aug.shape[-2:]
+        else:   
+            with torch.autocast("cuda", dtype=torch.bfloat16), torch.no_grad():
+                if self.use_camera_params:
+                    vggt_output = vggt(
+                        images=img_resize_wo_aug,
+                        extrinsics=extrinsics,
+                        intrinsics=intrinsics,
+                        camera_gt_index=camera_param_mask,
+                    )
+                else:
+                    vggt_output = vggt(img_resize_wo_aug)
+            agg_vggt_hidden = vggt_output["features"]
+            patch_start_idx = vggt_output["patch_start_idx"]
+            original_img = vggt_output["images"]
+            # from torchvision.utils import save_image; import matplotlib.cm as cm; import numpy as np; from PIL import Image
+            # save_image(original_img[0,0], 'image.png')
+            vggt_hidden = [hid[:, :, patch_start_idx:, :] for hid in agg_vggt_hidden]
 
-        # Resample VGGT hidden states to match the resolution of VLA hidden states
-        H, W = original_img.shape[-2:]
-        patch_h, patch_w = H // vggt.patch_size, W // vggt.patch_size
-        vggt_hidden = [
-            custom_pooling(
-                hid, (patch_h, patch_w), (H, W), vision_hidden[0], self.pooling_func, self.use_vggt_pe
-            )
-            for hid in vggt_hidden
-        ]
+            # Resample VGGT hidden states to match the resolution of VLA hidden states
+            H, W = original_img.shape[-2:]
+            patch_h, patch_w = H // vggt.patch_size, W // vggt.patch_size
+            vggt_hidden = [
+                custom_pooling(
+                    hid, (patch_h, patch_w), (H, W), vision_hidden[0], self.pooling_func, self.use_vggt_pe
+                )
+                for hid in vggt_hidden
+            ]
+
+        # save SpatialForcing features offline
+        if self.save_SF_feature:
+            for idx, _vggt_hidden in zip(frame_index, vggt_hidden):
+                save_path = os.path.join(self.save_SF_feature, f"{idx}.pt")
+                torch.save(_vggt_hidden[self.vggt_layers_align].cpu(), save_path)
 
         # empty image feature masks for alignment loss
         tokens_per_img = img_len // len(images)
@@ -467,7 +537,7 @@ class PI0Pytorch(nn.Module):
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
             noise = self.sample_noise(actions_shape, device)
 
-        images, _, _, img_masks, lang_tokens, lang_masks, state, _, _, _ = self._preprocess_observation(observation, train=False)
+        images, _, _, img_masks, lang_tokens, lang_masks, state, _, _, _, _ = self._preprocess_observation(observation, train=False)
 
         prefix_embs, prefix_pad_masks, prefix_att_masks, _ = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
