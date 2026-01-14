@@ -19,7 +19,7 @@ dependencies = [
     "jaxtyping==0.2.36",
     "lerobot",
     "ml_collections==1.0.0",
-    "numpy>=1.22.4,<2.0.0",
+    "numpy==1.26.4",
     "numpydantic>=1.6.6",
     "opencv-python>=4.10.0.84",
     "openpi-client",
@@ -77,14 +77,12 @@ rlds = [
 ]
 
 [tool.uv]
-index-url = "http://harbor.internal.com:8081/repository/pypi-hkust/simple"
-override-dependencies = ["datasets==4.0.0", "ml-dtypes==0.4.1", "tensorstore==0.1.74", "rerun-sdk; sys_platform == 'any'", "numpy>=1.25, <3.0.0; \"required_by\" == 'rerun-sdk'"]
+override-dependencies = ["datasets==4.0.0", "ml-dtypes==0.4.1", "tensorstore==0.1.74", "rerun-sdk; sys_platform == 'any'"]
 
 [tool.uv.sources]
 openpi-client = { workspace = true }
-lerobot = { path = "/data/user/wsong890/lifuhao/install_pkg/lerobot-0cf864870cf29f4738d3ade893e6fd13fbd7cdb5", editable = true }
-dlimp = { path = "/data/user/wsong890/lifuhao/install_pkg/dlimp-ad72ce3a9b414db2185bc0b38461d4101a65477a" }
-rerun-sdk = { path = "/data/user/wsong890/lifuhao/install_pkg/rerun_sdk-0.25.0a1+dev-cp39-abi3-manylinux_2_28_x86_64.whl" }
+lerobot = { path = "/cpfs01/projects-HDD/cfff-377aad6b032c_HDD/chenshuai/wenxuan/lifuhao/install_pkg/lerobot-0cf864870cf29f4738d3ade893e6fd13fbd7cdb5", editable = true }
+dlimp = { path = "/cpfs01/projects-HDD/cfff-377aad6b032c_HDD/chenshuai/wenxuan/lifuhao/install_pkg/dlimp-ad72ce3a9b414db2185bc0b38461d4101a65477a" }
 
 [tool.uv.workspace]
 members = ["packages/*", "src/vggt", "src/omnivggt"]

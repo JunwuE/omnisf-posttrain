@@ -1383,7 +1383,7 @@ def load_external_configs(directory_path: str) -> list[TrainConfig]:
 
     return external_configs
 
-EXTERNAL_CONFIG_DIR = "/data/user/wsong890/lifuhao/openpi-main/src/openpi/external_config"
+EXTERNAL_CONFIG_DIR = "/cpfs01/projects-HDD/cfff-377aad6b032c_HDD/chenshuai/wenxuan/lifuhao/openpi-main/src/openpi/external_config"
 _CONFIGS.extend(load_external_configs(EXTERNAL_CONFIG_DIR))
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
