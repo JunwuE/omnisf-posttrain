@@ -4,6 +4,7 @@ checkpoints/
 data/
 wandb/
 SF_feature/
+scripts/apply_diff/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
