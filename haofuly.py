@@ -19,7 +19,7 @@ except Exception as e:
 
 
 config = _config.get_config("pi0_aloha_place_one_floor_block")
-checkpoint_dir = "/data/user/wsong890/lifuhao/openpi-main/checkpoints/pytorch_pi0_base"
+checkpoint_dir = "/sharedata/lfh/openpi-main/checkpoints/pytorch_pi0_base"
 
 # Create a trained policy (automatically detects PyTorch format)
 policy = policy_config.create_trained_policy(config, checkpoint_dir)
