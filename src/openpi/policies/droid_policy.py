@@ -168,8 +168,13 @@ class OmniDroidInputs(transforms.DataTransformFn):
             inputs["actions"] = np.asarray(data["actions"])
 
         valid_prompt = [
-            res for p in [data["prompt"], data["language_instruction_2"], data["language_instruction_3"]]
-            if (res := (p.decode("utf-8") if isinstance(p, bytes) else p))
+            res
+            for p in [
+                data["language_instruction"],
+                data["language_instruction_2"],
+                data["language_instruction_3"],
+            ]
+            if (res := (p.decode("utf-8") if isinstance(p, bytes) else p)) is not None
         ]
         inputs["prompt"] = random.choice(valid_prompt)
 

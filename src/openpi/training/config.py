@@ -474,7 +474,7 @@ class LeRobotOmniDROIDDataConfig(DataConfigFactory):
                         "observation/exterior_image_1_left": "observation.images.exterior_1_left",
                         "observation/exterior_image_2_left": "observation.images.exterior_2_left",
                         "observation/wrist_image_left": "observation.images.wrist_left",
-                        "observation/joint_position": "action.joint_position",
+                        "observation/joint_position": "observation.state.joint_position",
                         "observation/gripper_position": "observation.state.gripper_position",
                         "extrinsics/exterior_image_1_left": "camera_extrinsics.exterior_1_left",
                         "extrinsics/exterior_image_2_left": "camera_extrinsics.exterior_2_left",
@@ -482,7 +482,6 @@ class LeRobotOmniDROIDDataConfig(DataConfigFactory):
                         "intrinsics/exterior_image_2_left": "camera_intrinsics.exterior_2_left",
                         "file_record_path": "file_record_path",
                         "actions": "action",
-                        "prompt": "prompt",
                         "language_instruction": "language_instruction",
                         "language_instruction_2": "language_instruction_2",
                         "language_instruction_3": "language_instruction_3",
@@ -502,6 +501,7 @@ class LeRobotOmniDROIDDataConfig(DataConfigFactory):
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+            action_sequence_keys=("action",),
         )
 
 
