@@ -4,11 +4,12 @@ import abc
 from collections.abc import Sequence
 import dataclasses
 import difflib
+import glob
+import importlib.util
 import logging
 import pathlib
-from typing import Any, Literal, Protocol, TypeAlias
-import importlib.util
 import sys
+from typing import Any, Literal, Protocol, TypeAlias
 
 import etils.epath as epath
 import flax.nnx as nnx
@@ -191,8 +192,8 @@ class DataConfigFactory(abc.ABC):
     def _load_norm_stats(self, assets_dir: epath.Path, asset_id: str | None) -> dict[str, _transforms.NormStats] | None:
         if asset_id is None:
             return None
+        data_assets_dir = str(assets_dir / asset_id)
         try:
-            data_assets_dir = str(assets_dir / asset_id)
             norm_stats = _normalize.load(_download.maybe_download(data_assets_dir))
             logging.info(f"Loaded norm stats from {data_assets_dir}")
             return norm_stats
@@ -244,16 +245,24 @@ class MixedLeRobotDataConfig(DataConfigFactory):
             if source.weight <= 0:
                 raise ValueError(f"Mixed data source '{source.name}' must have weight > 0, got {source.weight}.")
 
-            component = source.data_factory.create(assets_dirs, model_config)
-            components.append(
-                dataclasses.replace(
-                    component,
-                    asset_id=shared_config.asset_id,
-                    norm_stats=shared_config.norm_stats,
-                    use_quantile_norm=shared_config.use_quantile_norm,
+            for source_dataset in glob_mixed_data_source(source):
+                component_factory = dataclasses.replace(
+                    source_dataset.data_factory,
+                    assets=AssetsConfig(
+                        assets_dir=self.assets.assets_dir,
+                        asset_id=shared_config.asset_id,
+                    ),
                 )
-            )
-            weights.append(source.weight)
+                component = component_factory.create(assets_dirs, model_config)
+                components.append(
+                    dataclasses.replace(
+                        component,
+                        asset_id=shared_config.asset_id,
+                        norm_stats=shared_config.norm_stats,
+                        use_quantile_norm=shared_config.use_quantile_norm,
+                    )
+                )
+                weights.append(source_dataset.weight)
 
         return MixedDataConfig(
             repo_id=shared_config.repo_id,
@@ -1394,6 +1403,36 @@ _CONFIGS = [
     #
     *roboarena_config.get_roboarena_configs(),
 ]
+
+
+def glob_mixed_data_source(source: MixedDataSourceConfig) -> Sequence[MixedDataSourceConfig]:
+    """
+    repo_id can be wildcard, like ./data/intern/data/* 
+    Note: the sampling weight will be distributed evenly.
+    """
+    repo_id = source.data_factory.repo_id
+    if not repo_id.startswith(("/", "./", "../", "~")) or not glob.has_magic(repo_id):
+        return (source,)
+
+    expanded_pattern = str(pathlib.Path(repo_id).expanduser())
+    matches = sorted(pathlib.Path(match) for match in glob.glob(expanded_pattern))
+    dataset_dirs = [path for path in matches if path.is_dir() and (path / "meta").is_dir()]  # LerobotDataset format
+    if not dataset_dirs:
+        raise ValueError(
+            f"Mixed data source '{source.name}' pattern '{repo_id}' did not match any valid LeRobot dataset directories."
+        )
+
+    expanded_weight = source.weight / len(dataset_dirs)
+    return tuple(
+        dataclasses.replace(
+            source,
+            name=f"{source.name}:{dataset_dir.name}",
+            weight=expanded_weight,
+            data_factory=dataclasses.replace(source.data_factory, repo_id=str(dataset_dir)),
+        )
+        for dataset_dir in dataset_dirs
+    )
+
 
 def load_external_configs(directory_path: str) -> list[TrainConfig]:
     external_configs = []
