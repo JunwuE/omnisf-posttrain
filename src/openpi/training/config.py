@@ -211,6 +211,62 @@ class FakeDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class MixedDataConfig(DataConfig):
+
+    components: Sequence[DataConfig] = ()
+    weights: Sequence[float] = ()
+    pad_camera_params: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
+class MixedDataSourceConfig:
+    """One source inside a mixed dataset config."""
+
+    name: str
+    weight: float
+    data_factory: tyro.conf.Suppress[DataConfigFactory]
+
+
+@dataclasses.dataclass(frozen=True)
+class MixedLeRobotDataConfig(DataConfigFactory):
+
+    repo_id: str = "mixed"
+    sources: Sequence[MixedDataSourceConfig] = ()
+    pad_camera_params: bool = False
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> MixedDataConfig:
+        shared_config = self.create_base_config(assets_dirs, model_config)
+        components: list[DataConfig] = []
+        weights: list[float] = []
+
+        for source in self.sources:
+            if source.weight <= 0:
+                raise ValueError(f"Mixed data source '{source.name}' must have weight > 0, got {source.weight}.")
+
+            component = source.data_factory.create(assets_dirs, model_config)
+            components.append(
+                dataclasses.replace(
+                    component,
+                    asset_id=shared_config.asset_id,
+                    norm_stats=shared_config.norm_stats,
+                    use_quantile_norm=shared_config.use_quantile_norm,
+                )
+            )
+            weights.append(source.weight)
+
+        return MixedDataConfig(
+            repo_id=shared_config.repo_id,
+            asset_id=shared_config.asset_id,
+            norm_stats=shared_config.norm_stats,
+            use_quantile_norm=shared_config.use_quantile_norm,
+            components=components,
+            weights=weights,
+            pad_camera_params=self.pad_camera_params,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class SimpleDataConfig(DataConfigFactory):
     # Factory for the data transforms.
     data_transforms: tyro.conf.Suppress[GroupFactory] = dataclasses.field(default_factory=GroupFactory)

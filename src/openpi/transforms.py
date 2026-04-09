@@ -358,6 +358,31 @@ class PadStatesAndActions(DataTransformFn):
         return data
 
 
+class PadCameraParams(DataTransformFn):
+    """Fills optional camera parameters so mixed samples can share one tree structure."""
+
+    def __call__(self, data: DataDict) -> DataDict:
+        image_keys = tuple(data.get("image", {}).keys())
+        if not image_keys:
+            return data
+
+        camera_param = dict(data.get("camera_param") or {})
+        camera_param_mask = dict(data.get("camera_param_mask") or {})
+
+        for image_key in image_keys:
+            extrinsics_key = f"{image_key}_extrinsics"
+            intrinsics_key = f"{image_key}_intrinsics"
+            camera_param.setdefault(extrinsics_key, np.zeros((3, 4), dtype=np.float32))
+            camera_param.setdefault(intrinsics_key, np.zeros((3, 3), dtype=np.float32))
+            camera_param_mask.setdefault(image_key, np.False_)
+
+        if camera_param:
+            data["camera_param"] = camera_param
+            data["camera_param_mask"] = camera_param_mask
+
+        return data
+
+
 def flatten_dict(tree: at.PyTree) -> dict:
     """Flatten a nested dictionary. Uses '/' as the separator."""
     return traverse_util.flatten_dict(tree, sep="/")

@@ -127,6 +127,36 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
+class WeightedMixedDataset(Dataset):
+    """Mixes multiple datasets with configurable source weights."""
+
+    def __init__(self, datasets: Sequence[Dataset], weights: Sequence[float], *, seed: int = 0):
+        weight_array = np.asarray(weights)
+
+        self._datasets = datasets
+        self._weights = weight_array / weight_array.sum()
+        self._length = sum(len(dataset) for dataset in datasets)
+        self._seed = seed
+        self._epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self._epoch = epoch
+
+    def __getitem__(self, index: SupportsIndex) -> dict:
+        index_value = index.__index__()
+        if index_value < 0:
+            index_value %= self._length
+
+        # TODO: more efficient and fair sampling
+        rng = np.random.default_rng(np.random.SeedSequence([self._seed, self._epoch, index_value]))
+        dataset_index = int(rng.choice(len(self._datasets), p=self._weights))
+        sample_index = int(rng.integers(len(self._datasets[dataset_index])))
+        return self._datasets[dataset_index][sample_index]
+
+    def __len__(self) -> int:
+        return self._length
+
+
 def create_torch_dataset(
     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
 ) -> Dataset:
@@ -169,8 +199,12 @@ def create_rlds_dataset(
     )
 
 
-def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip_norm_stats: bool = False) -> Dataset:
-    """Transform the dataset by applying the data transforms."""
+def transform_dataset(
+    dataset: Dataset,data_config: _config.DataConfig, 
+    *, 
+    skip_norm_stats: bool = False, 
+    tail_transforms: Sequence[_transforms.DataTransformFn] = (),
+) -> Dataset:
     norm_stats = {}
     if data_config.repo_id != "fake" and not skip_norm_stats:
         if data_config.norm_stats is None:
@@ -187,8 +221,45 @@ def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip
             *data_config.data_transforms.inputs,
             _transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
             *data_config.model_transforms.inputs,
+            *tail_transforms,
         ],
     )
+
+
+def create_transformed_single_torch_dataset(
+    data_config: _config.DataConfig,
+    action_horizon: int,
+    model_config: _model.BaseModelConfig,
+    *,
+    skip_norm_stats: bool = False,
+    tail_transforms: Sequence[_transforms.DataTransformFn] = (),
+) -> Dataset:
+    dataset = create_torch_dataset(data_config, action_horizon, model_config)
+    return transform_dataset(dataset, data_config, 
+                             skip_norm_stats=skip_norm_stats,
+                                tail_transforms=tail_transforms,)
+
+
+def create_transformed_mixed_torch_dataset(
+    data_config: _config.MixedDataConfig,
+    action_horizon: int,
+    model_config: _model.BaseModelConfig,
+    *,
+    seed: int = 0,
+    skip_norm_stats: bool = False,
+    tail_transforms: Sequence[_transforms.DataTransformFn] = (),
+) -> Dataset:
+    aligned_datasets = [
+        create_transformed_single_torch_dataset(
+            component,
+            action_horizon,
+            model_config,
+            skip_norm_stats=skip_norm_stats,
+            tail_transforms=(_transforms.PadCameraParams(), *tail_transforms) if data_config.pad_camera_params else tail_transforms,
+        )
+        for component in data_config.components
+    ]
+    return WeightedMixedDataset(aligned_datasets, data_config.weights, seed=seed)
 
 
 def transform_iterable_dataset(
@@ -299,8 +370,21 @@ def create_torch_data_loader(
             execute in the main process.
         seed: The seed to use for shuffling the data.
     """
-    dataset = create_torch_dataset(data_config, action_horizon, model_config)
-    dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
+    if isinstance(data_config, _config.MixedDataConfig):
+        dataset = create_transformed_mixed_torch_dataset(
+            data_config,
+            action_horizon,
+            model_config,
+            seed=seed,
+            skip_norm_stats=skip_norm_stats,
+        )
+    else:
+        dataset = create_transformed_single_torch_dataset(
+            data_config,
+            action_horizon,
+            model_config,
+            skip_norm_stats=skip_norm_stats,
+        )
 
     # Use TorchDataLoader for both frameworks
     # For PyTorch DDP, create DistributedSampler and divide batch size by world size
@@ -424,6 +508,9 @@ class TorchDataLoader:
                 jax.sharding.PartitionSpec("B"),
             )
         self._num_batches = num_batches
+        self._sampler = sampler
+        self._dataset = dataset
+        self._epoch = 0
 
         mp_context = None
         if num_workers > 0:
@@ -452,6 +539,11 @@ class TorchDataLoader:
     def __iter__(self):
         num_items = 0
         while True:
+            if self._sampler is not None and hasattr(self._sampler, "set_epoch"):
+                self._sampler.set_epoch(self._epoch)
+            if hasattr(self._dataset, "set_epoch"):
+                self._dataset.set_epoch(self._epoch)
+            self._epoch += 1
             data_iter = iter(self._data_loader)
             while True:
                 if self._num_batches is not None and num_items >= self._num_batches:
