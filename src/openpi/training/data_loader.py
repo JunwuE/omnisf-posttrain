@@ -128,14 +128,19 @@ class FakeDataset(Dataset):
 
 
 class WeightedMixedDataset(Dataset):
-    """Mixes multiple datasets with configurable source weights."""
-
+    """
+    Mixes multiple datasets with configurable source weights.
+    Each dataset is sampled with probability proportional to ``len(dataset) * weight``.
+    """
     def __init__(self, datasets: Sequence[Dataset], weights: Sequence[float], *, seed: int = 0):
         weight_array = np.asarray(weights)
+        dataset_lengths = np.asarray([len(dataset) for dataset in datasets])
+        effective_weights = dataset_lengths * weight_array
+        total_weight = effective_weights.sum()
 
         self._datasets = datasets
-        self._weights = weight_array / weight_array.sum()
-        self._length = sum(len(dataset) for dataset in datasets)
+        self._weights = effective_weights / total_weight
+        self._length = int(dataset_lengths.sum())
         self._seed = seed
         self._epoch = 0
 
