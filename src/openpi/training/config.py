@@ -23,6 +23,8 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.agilex_policy as agilex_policy
+import openpi.policies.interndata_policy as interndata_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -234,6 +236,7 @@ class MixedLeRobotDataConfig(DataConfigFactory):
     repo_id: str = "mixed"
     sources: Sequence[MixedDataSourceConfig] = ()
     pad_camera_params: bool = False
+    use_eef_action: bool = False
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> MixedDataConfig:
@@ -325,6 +328,133 @@ class LeRobotAlohaDataConfig(DataConfigFactory):
         data_transforms = _transforms.Group(
             inputs=[aloha_policy.AlohaInputs(adapt_to_pi=self.adapt_to_pi)],
             outputs=[aloha_policy.AlohaOutputs(adapt_to_pi=self.adapt_to_pi)],
+        )
+        if self.use_delta_joint_actions:
+            delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotAgilexDataConfig(DataConfigFactory):
+    # If true, will convert joint dimensions to deltas with respect to the current state before passing to the model.
+    # Gripper dimensions will remain in absolute values.
+    use_delta_joint_actions: bool = True
+    # If provided, will be injected into the input data if the "prompt" key is not present.
+    default_prompt: str | None = None
+    # If true, this will convert the joint and gripper values from the standard Aloha space to
+    # the space used by the pi internal runtime which was used to train the base model. People who
+    # use standard Aloha data should set this to true.
+    adapt_to_pi: bool = False
+    # use eef instead of joint as action and state representations.
+    use_eef_action: bool = False
+
+    # Repack transforms.
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.cam_high",
+                        "cam_left_wrist": "observation.images.cam_left_wrist",
+                        "cam_right_wrist": "observation.images.cam_right_wrist",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                })
+            ]
+        )
+    )
+    # Action keys that will be used to read the action sequence from the dataset.
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[agilex_policy.AgilexInputs(adapt_to_pi=self.adapt_to_pi, use_eef_action=self.use_eef_action)],
+            outputs=[agilex_policy.AgilexOutputs(adapt_to_pi=self.adapt_to_pi, use_eef_action=self.use_eef_action)],
+        )
+        if self.use_delta_joint_actions:
+            delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotInterndataDataConfig(DataConfigFactory):
+    # If true, will convert joint dimensions to deltas with respect to the current state before passing to the model.
+    # Gripper dimensions will remain in absolute values.
+    use_delta_joint_actions: bool = True
+    # If provided, will be injected into the input data if the "prompt" key is not present.
+    default_prompt: str | None = None
+    # If true, this will convert the joint and gripper values from the standard Aloha space to
+    # the space used by the pi internal runtime which was used to train the base model. People who
+    # use standard Aloha data should set this to true.
+    adapt_to_pi: bool = False
+    # use eef instead of joint as action and state representations.
+    use_eef_action: bool = False
+
+    # Repack transforms.
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "images.rgb.head",
+                        "cam_left_wrist": "images.rgb.hand_left",
+                        "cam_right_wrist": "images.rgb.hand_right",
+                    },
+                    "state_left_joint": "states.left_joint.position",
+                    "state_left_gripper":  "states.left_gripper.position",
+                    "state_right_joint": "states.right_joint.position",
+                    "state_right_gripper":  "states.right_gripper.position",
+                    "actions_left_joint": "actions.left_joint.position",
+                    "actions_left_gripper":  "actions.left_gripper.position",
+                    "actions_right_joint": "actions.right_joint.position",
+                    "actions_right_gripper":  "actions.right_gripper.position",
+                    "prompt": "prompt",
+                })
+            ]
+        )
+    )
+    # Action keys that will be used to read the action sequence from the dataset.
+    action_sequence_keys: Sequence[str] = (
+        "actions.left_joint.position",
+        "actions.left_gripper.position",
+        "actions.right_joint.position",
+        "actions.right_gripper.position",
+    )
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[interndata_policy.InterndataInputs(adapt_to_pi=self.adapt_to_pi, use_eef_action=self.use_eef_action)],
+            outputs=[interndata_policy.InterndataOutputs(adapt_to_pi=self.adapt_to_pi, use_eef_action=self.use_eef_action)],
         )
         if self.use_delta_joint_actions:
             delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
@@ -1407,8 +1537,9 @@ _CONFIGS = [
 
 def glob_mixed_data_source(source: MixedDataSourceConfig) -> Sequence[MixedDataSourceConfig]:
     """
-    repo_id can be wildcard, like ./data/intern/data/* 
-    Note: the sampling weight will be distributed evenly.
+    repo_id can be wildcard, like ./data/intern/data/*
+    Expanded datasets inherit the parent source weight; the mixed sampler combines
+    that weight with each dataset's sample count.
     """
     repo_id = source.data_factory.repo_id
     if not repo_id.startswith(("/", "./", "../", "~")) or not glob.has_magic(repo_id):
@@ -1422,12 +1553,10 @@ def glob_mixed_data_source(source: MixedDataSourceConfig) -> Sequence[MixedDataS
             f"Mixed data source '{source.name}' pattern '{repo_id}' did not match any valid LeRobot dataset directories."
         )
 
-    expanded_weight = source.weight / len(dataset_dirs)
     return tuple(
         dataclasses.replace(
             source,
             name=f"{source.name}:{dataset_dir.name}",
-            weight=expanded_weight,
             data_factory=dataclasses.replace(source.data_factory, repo_id=str(dataset_dir)),
         )
         for dataset_dir in dataset_dirs
