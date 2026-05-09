@@ -931,13 +931,13 @@ _CONFIGS = [
         # Here you define which pre-trained checkpoint you want to load to initialize the model.
         # This should match the model config you chose above -- i.e. in this case we use the pi0 base model.
         weight_loader=weight_loaders.CheckpointWeightLoader("~/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"),
-        pytorch_weight_path='/sharedata/lfh/openpi-main/checkpoints/pytorch_pi0_base',
+        pytorch_weight_path='/data/user/wsong890/lifuhao/omnisf-main/checkpoints/pytorch_pi0_base',
         # Below you can define other hyperparameters like the learning rate, number of training steps, etc.
         # Check the base TrainConfig class for a full list of available hyperparameters.
         num_train_steps=30_000,
         save_interval=30000,
         # Below is Spatial Forcing configs
-        vggt_weight_path='/sharedata/lfh/openpi-main/checkpoints/vggt',
+        vggt_weight_path='/data/user/wsong890/lifuhao/omnisf-main/checkpoints/vggt',
         vla_layers_align=12,
         vla_adapt_layers_align=False,
         vggt_layers_align=-1,
@@ -972,13 +972,13 @@ _CONFIGS = [
         # Here you define which pre-trained checkpoint you want to load to initialize the model.
         # This should match the model config you chose above -- i.e. in this case we use the pi0 base model.
         weight_loader=weight_loaders.CheckpointWeightLoader("~/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"),
-        pytorch_weight_path='/sharedata/lfh/openpi-main/checkpoints/pytorch_pi0_base',
+        pytorch_weight_path='/data/user/wsong890/lifuhao/omnisf-main/checkpoints/pytorch_pi0_base',
         # Below you can define other hyperparameters like the learning rate, number of training steps, etc.
         # Check the base TrainConfig class for a full list of available hyperparameters.
         num_train_steps=30_000,
         save_interval=30000,
         # Below is Spatial Forcing configs
-        vggt_weight_path='/sharedata/lfh/openpi-main/checkpoints/vggt',
+        vggt_weight_path='/data/user/wsong890/lifuhao/omnisf-main/checkpoints/vggt',
         vla_layers_align=12,
         vla_adapt_layers_align=False,
         vggt_layers_align=-1,
@@ -1134,9 +1134,9 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("~/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"),
-        pytorch_weight_path='/sharedata/lfh/openpi-main/checkpoints/pytorch_pi0_base',
+        pytorch_weight_path='/data/user/wsong890/lifuhao/omnisf-main/checkpoints/pytorch_pi0_base',
         #
-        vggt_weight_path='/sharedata/lfh/openpi-main/checkpoints/vggt',
+        vggt_weight_path='/data/user/wsong890/lifuhao/omnisf-main/checkpoints/vggt',
         vla_layers_align=12,
         vggt_layers_align=-1,
         pooling_func='bilinear',
@@ -1177,9 +1177,9 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("~/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"),
-        pytorch_weight_path='/sharedata/lfh/openpi-main/checkpoints/pytorch_pi0_base',
+        pytorch_weight_path='/data/user/wsong890/lifuhao/omnisf-main/checkpoints/pytorch_pi0_base',
         #
-        vggt_weight_path='/sharedata/lfh/openpi-main/checkpoints/vggt',
+        vggt_weight_path='/data/user/wsong890/lifuhao/omnisf-main/checkpoints/vggt',
         vla_layers_align=12,
         vggt_layers_align=-1,
         pooling_func='bilinear',
@@ -1221,9 +1221,9 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("/data/user/wzhang834/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"),
-        pytorch_weight_path='/sharedata/lfh/openpi-main/checkpoints/pytorch_pi05_base',
+        pytorch_weight_path='/data/user/wsong890/lifuhao/omnisf-main/checkpoints/pytorch_pi05_base',
         #
-        vggt_weight_path='/sharedata/lfh/openpi-main/checkpoints/vggt',
+        vggt_weight_path='/data/user/wsong890/lifuhao/omnisf-main/checkpoints/vggt',
         vla_layers_align=12,
         vggt_layers_align=-1,
         pooling_func='bilinear',
@@ -1300,8 +1300,8 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "~/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"
         ),
-        pytorch_weight_path='/sharedata/lfh/openpi-main/checkpoints/pytorch_pi0_base',
-        vggt_weight_path='/sharedata/lfh/openpi-main/checkpoints/vggt',
+        pytorch_weight_path='/data/user/wsong890/lifuhao/omnisf-main/checkpoints/pytorch_pi0_base',
+        vggt_weight_path='/data/user/wsong890/lifuhao/omnisf-main/checkpoints/vggt',
         vla_layers_align=12,
         vggt_layers_align=-1,
         pooling_func='bilinear',
@@ -1371,9 +1371,9 @@ _CONFIGS = [
                 ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("~/.cache/openpi/openpi-assets/checkpoints/pi0_base/params"),
-        pytorch_weight_path='/sharedata/lfh/openpi-main/checkpoints/pytorch_pi0_base',
+        pytorch_weight_path='/data/user/wsong890/lifuhao/omnisf-main/checkpoints/pytorch_pi0_base',
         #
-        vggt_weight_path='/sharedata/lfh/openpi-main/checkpoints/vggt',
+        vggt_weight_path='/data/user/wsong890/lifuhao/omnisf-main/checkpoints/vggt',
         vla_layers_align=12,
         vggt_layers_align=-1,
         pooling_func='bilinear',
@@ -1607,7 +1607,7 @@ def load_external_configs(directory_path: str) -> list[TrainConfig]:
 
     return external_configs
 
-EXTERNAL_CONFIG_DIR = "/sharedata/lfh/openpi-main/src/openpi/external_config"
+EXTERNAL_CONFIG_DIR = "/data/user/wsong890/lifuhao/omnisf-main/src/openpi/external_config"
 _CONFIGS.extend(load_external_configs(EXTERNAL_CONFIG_DIR))
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):

@@ -173,3 +173,8 @@ cython_debug/
 zzz实验日志.md
 uv.lock
 src/openpi/external_config
+.vscode/
+pyrightconfig.json
+haofuly.py
+forward_kinemics.py
+piper_pinocchio.py
