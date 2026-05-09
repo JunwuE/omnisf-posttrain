@@ -33,6 +33,8 @@ import torch
 import tqdm
 import tyro
 
+import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
+
 import openpi.models.model as _model
 import openpi.shared.normalize as normalize
 import openpi.training.config as _config
@@ -43,6 +45,79 @@ import openpi.transforms as transforms
 class RemoveStrings(transforms.DataTransformFn):
     def __call__(self, x: dict) -> dict:
         return {k: v for k, v in x.items() if not np.issubdtype(np.asarray(v).dtype, np.str_)}
+
+
+class KeepStatsKeys(transforms.DataTransformFn):
+    def __call__(self, x: dict) -> dict:
+        return {key: x[key] for key in ("state", "actions") if key in x}
+
+
+@dataclasses.dataclass(frozen=True)
+class StatsRepackTransform(transforms.DataTransformFn):
+    structure: object
+    visual_source_keys: frozenset[str]
+    dummy_image_shape: tuple[int, int, int] = (224, 224, 3)
+
+    def __call__(self, data: dict) -> dict:
+        flat_item = transforms.flatten_dict(data)
+        flat_structure = transforms.flatten_dict(self.structure)
+
+        output = {}
+        for dest_key, source_key in flat_structure.items():
+            if source_key in flat_item:
+                output[dest_key] = flat_item[source_key]
+            elif source_key in self.visual_source_keys:
+                output[dest_key] = np.zeros(self.dummy_image_shape, dtype=np.uint8)
+            else:
+                raise KeyError(f"Stats repack could not find source key '{source_key}' for '{dest_key}'.")
+
+        return transforms.unflatten_dict(output)
+
+
+class StatsOnlyLeRobotDataset:
+    """A lightweight LeRobot view for norm stats that never decodes image/video payloads."""
+
+    def __init__(self, dataset):
+        self._dataset = dataset
+        self._visual_source_keys = frozenset(
+            key for key, feature in dataset.meta.features.items() if feature["dtype"] in {"image", "video"}
+        )
+        removable_visual_columns = sorted(self._visual_source_keys & set(dataset.hf_dataset.column_names))
+        if removable_visual_columns:
+            self._hf_dataset = dataset.hf_dataset.remove_columns(removable_visual_columns)
+        else:
+            self._hf_dataset = dataset.hf_dataset
+
+    @property
+    def visual_source_keys(self) -> frozenset[str]:
+        return self._visual_source_keys
+
+    def _query_hf_dataset(self, query_indices: dict[str, list[int]]) -> dict:
+        column_names = set(self._hf_dataset.column_names)
+        return {
+            key: torch.stack([torch.as_tensor(value) for value in self._hf_dataset.select(q_idx)[key]])
+            for key, q_idx in query_indices.items()
+            if key in column_names
+        }
+
+    def __getitem__(self, idx) -> dict:
+        item = self._hf_dataset[idx]
+        episode_index = item["episode_index"]
+        ep_idx = int(episode_index.item() if hasattr(episode_index, "item") else episode_index)
+
+        if self._dataset.delta_indices is not None:
+            query_indices, padding = self._dataset._get_query_indices(idx, ep_idx)  # noqa: SLF001
+            item = {**item, **padding, **self._query_hf_dataset(query_indices)}
+
+        task_index = item.get("task_index")
+        if task_index is not None:
+            task_index = int(task_index.item() if hasattr(task_index, "item") else task_index)
+            item["task"] = self._dataset.meta.tasks[task_index]
+
+        return item
+
+    def __len__(self) -> int:
+        return len(self._hf_dataset)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -173,6 +248,63 @@ def resolve_output_path(config: _config.TrainConfig, data_config: _config.DataCo
     return config.assets_dirs / data_config.asset_id
 
 
+def _adapt_repack_transforms_for_stats(
+    transform_fns: Sequence[transforms.DataTransformFn],
+    visual_source_keys: frozenset[str],
+) -> list[transforms.DataTransformFn]:
+    adapted = []
+    for transform_fn in transform_fns:
+        if isinstance(transform_fn, transforms.RepackTransform):
+            adapted.append(StatsRepackTransform(transform_fn.structure, visual_source_keys))
+        else:
+            adapted.append(transform_fn)
+    return adapted
+
+
+def _try_create_stats_only_torch_dataset(
+    data_config: _config.DataConfig,
+    action_horizon: int,
+    model_config: _model.BaseModelConfig,
+) -> _data_loader.Dataset:
+    dataset = _data_loader.create_torch_dataset(data_config, action_horizon, model_config)
+
+    if lerobot_dataset is None:
+        base_dataset = None
+    elif isinstance(dataset, lerobot_dataset.LeRobotDataset):
+        base_dataset = dataset
+    elif isinstance(dataset, _data_loader.TransformedDataset) and isinstance(
+        getattr(dataset, "_dataset", None), lerobot_dataset.LeRobotDataset
+    ):
+        base_dataset = dataset._dataset  # noqa: SLF001
+    else:
+        base_dataset = None
+
+    if base_dataset is None:
+        repack_transforms = list(data_config.repack_transforms.inputs)
+    else:
+        stats_base_dataset = StatsOnlyLeRobotDataset(base_dataset)
+        dataset = stats_base_dataset
+        if data_config.prompt_from_task:
+            dataset = _data_loader.TransformedDataset(
+                dataset,
+                [transforms.PromptFromLeRobotTask(base_dataset.meta.tasks)],
+            )
+        repack_transforms = _adapt_repack_transforms_for_stats(
+            data_config.repack_transforms.inputs,
+            stats_base_dataset.visual_source_keys,
+        )
+
+    return _data_loader.TransformedDataset(
+        dataset,
+        [
+            *repack_transforms,
+            *data_config.data_transforms.inputs,
+            KeepStatsKeys(),
+            RemoveStrings(),
+        ],
+    )
+
+
 def create_torch_dataloader(
     data_config: _config.DataConfig,
     action_horizon: int,
@@ -183,16 +315,7 @@ def create_torch_dataloader(
 ) -> tuple[_data_loader.Dataset, int]:
     if data_config.repo_id is None:
         raise ValueError("Data config must have a repo_id")
-    dataset = _data_loader.create_torch_dataset(data_config, action_horizon, model_config)
-    dataset = _data_loader.TransformedDataset(
-        dataset,
-        [
-            *data_config.repack_transforms.inputs,
-            *data_config.data_transforms.inputs,
-            # Remove strings since they are not supported by JAX and are not needed to compute norm stats.
-            RemoveStrings(),
-        ],
-    )
+    dataset = _try_create_stats_only_torch_dataset(data_config, action_horizon, model_config)
     if max_frames is not None and max_frames < len(dataset):
         num_batches = max_frames // batch_size
         shuffle = True
@@ -256,38 +379,38 @@ def allocate_component_sampling_plans(
     weights: Sequence[float],
     max_frames: int | None,
 ) -> list[ComponentSamplingPlan]:
+    """Allocate mixed-dataset sampling plans.
+
+    For mixed norm stats, ``max_frames`` is a per-component cap rather than a
+    global frame budget. Component weighting matches ``WeightedMixedDataset``:
+    each component contributes in proportion to ``len(component) * weight``.
+    """
     dataset_lengths = np.asarray(dataset_lengths, dtype=int)
-    normalized_weights = normalize_weights(weights)
+    raw_weights = np.asarray(weights, dtype=np.float64)
+    normalize_weights(raw_weights)
 
     if np.any(dataset_lengths <= 0):
         raise ValueError("All mixed datasets must contain at least one sample.")
+    if dataset_lengths.shape != raw_weights.shape:
+        raise ValueError("Dataset lengths and weights must have the same shape.")
+    if max_frames is not None and max_frames < 0:
+        raise ValueError("max_frames must be non-negative.")
 
-    if max_frames is None or max_frames >= int(np.sum(dataset_lengths)):
+    if max_frames is None:
         quotas = dataset_lengths.copy()
     else:
-        desired = normalized_weights * max_frames
-        quotas = np.minimum(np.floor(desired).astype(int), dataset_lengths)
-        remaining = max_frames - int(np.sum(quotas))
+        quotas = np.minimum(dataset_lengths, max_frames)
 
-        while remaining > 0:
-            available = quotas < dataset_lengths
-            if not np.any(available):
-                break
-
-            scores = np.full_like(normalized_weights, -np.inf, dtype=np.float64)
-            scores[available] = desired[available] - quotas[available]
-            if np.all(scores[available] <= 0):
-                scores[available] = normalized_weights[available]
-
-            quotas[int(np.argmax(scores))] += 1
-            remaining -= 1
+    # Match training-time mixed sampling, where component probability is
+    # proportional to len(component) * weight.
+    effective_weights = dataset_lengths.astype(np.float64) * raw_weights
 
     return [
         ComponentSamplingPlan(
             quota=int(quota),
-            per_sample_weight=(0.0 if quota == 0 else float(weight / quota)),
+            per_sample_weight=(0.0 if quota == 0 else float(effective_weight / quota)),
         )
-        for quota, weight in zip(quotas, normalized_weights, strict=True)
+        for quota, effective_weight in zip(quotas, effective_weights, strict=True)
     ]
 
 
@@ -310,15 +433,7 @@ def create_mixed_component_dataset(
     if data_config.repo_id is None:
         raise ValueError("Data config must have a repo_id")
 
-    dataset = _data_loader.create_torch_dataset(data_config, action_horizon, model_config)
-    return _data_loader.TransformedDataset(
-        dataset,
-        [
-            *data_config.repack_transforms.inputs,
-            *data_config.data_transforms.inputs,
-            RemoveStrings(),
-        ],
-    )
+    return _try_create_stats_only_torch_dataset(data_config, action_horizon, model_config)
 
 
 def create_mixed_component_dataloader(
@@ -352,6 +467,8 @@ def compute_mixed_torch_norm_stats(
     datasets = [
         create_mixed_component_dataset(component, action_horizon, model_config) for component in data_config.components
     ]
+    # Mixed configs cap each expanded component independently and weight them
+    # like training-time WeightedMixedDataset, using len(component) * weight.
     plans = allocate_component_sampling_plans(
         [len(dataset) for dataset in datasets],
         data_config.weights,
@@ -370,8 +487,14 @@ def compute_mixed_torch_norm_stats(
             indices = select_sample_indices(len(dataset), plan.quota, seed, component_index)
             selected_dataset = torch.utils.data.Subset(dataset, indices.tolist())
 
+        component_repo_id = data_config.components[component_index].repo_id
         data_loader = create_mixed_component_dataloader(selected_dataset, batch_size, num_workers)
         num_batches = math.ceil(plan.quota / batch_size)
+        print(
+            f"Component {component_index + 1}/{len(datasets)}: "
+            f"repo_id={component_repo_id}, quota={plan.quota}, batch_size={batch_size}, "
+            f"num_workers={num_workers}, num_batches={num_batches}"
+        )
         for batch in tqdm.tqdm(data_loader, total=num_batches, desc="Computing stats"):
             for key in keys:
                 stats[key].update(np.asarray(batch[key]), sample_weight=plan.per_sample_weight)
@@ -379,13 +502,21 @@ def compute_mixed_torch_norm_stats(
     return {key: stats[key].get_statistics() for key in keys}
 
 
-def main(config_name: str, max_frames: int | None = None, seed: int = 0):
+def main(
+    config_name: str,
+    max_frames: int | None = None,  # 8192
+    seed: int = 0,
+    batch_size: int | None = None,  # 2048 for cfff
+    num_workers: int | None = None,  # 32 for cfff
+):
     config = _config.get_config(config_name)
     data_config = config.data.create(config.assets_dirs, config.model)
+    effective_batch_size = config.batch_size if batch_size is None else batch_size
+    effective_num_workers = config.num_workers if num_workers is None else num_workers
 
     if data_config.rlds_data_dir is not None:
         data_loader, num_batches = create_rlds_dataloader(
-            data_config, config.model.action_horizon, config.batch_size, max_frames
+            data_config, config.model.action_horizon, effective_batch_size, max_frames
         )
         keys = ["state", "actions"]
         stats = {key: normalize.RunningStats() for key in keys}
@@ -399,15 +530,20 @@ def main(config_name: str, max_frames: int | None = None, seed: int = 0):
         norm_stats = compute_mixed_torch_norm_stats(
             data_config,
             config.model.action_horizon,
-            config.batch_size,
+            effective_batch_size,
             config.model,
-            config.num_workers,
+            effective_num_workers,
             max_frames=max_frames,
             seed=seed,
         )
     else:
         data_loader, num_batches = create_torch_dataloader(
-            data_config, config.model.action_horizon, config.batch_size, config.model, config.num_workers, max_frames
+            data_config,
+            config.model.action_horizon,
+            effective_batch_size,
+            config.model,
+            effective_num_workers,
+            max_frames,
         )
 
         keys = ["state", "actions"]
