@@ -89,12 +89,12 @@ class Observation(Generic[ArrayT]):
 
     # Images, in [-1, 1] float32.
     images: dict[str, at.Float[ArrayT, "*b h w c"]]
-    # the padding area for non-rectangular input images is False
-    image_padding_mask: dict[str, at.Bool[ArrayT, "*b w c"]]
     # Image masks, with same keys as images.
     image_masks: dict[str, at.Bool[ArrayT, "*b"]]
     # Low-dimensional robot state.
     state: at.Float[ArrayT, "*b s"]
+    # the padding area for non-rectangular input images is False.
+    image_padding_mask: dict[str, at.Bool[ArrayT, "*b h w"]] | None = None
 
     # Tokenized prompt.
     tokenized_prompt: at.Int[ArrayT, "*b l"] | None = None
