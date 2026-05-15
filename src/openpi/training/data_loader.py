@@ -1,7 +1,9 @@
 from collections.abc import Iterator, Sequence
+import queue
 import logging
 import multiprocessing
 import os
+import threading
 import typing
 from typing import Literal, Protocol, SupportsIndex, TypeVar
 
@@ -160,6 +162,66 @@ class WeightedMixedDataset(Dataset):
 
     def __len__(self) -> int:
         return self._length
+
+
+class _PrefetchIterator:
+    """Background-prefetch an iterator into a bounded queue."""
+
+    _END = object()
+
+    def __init__(self, iterator: Iterator, depth: int):
+        if depth <= 0:
+            raise ValueError(f"Prefetch depth must be positive, got {depth}.")
+        self._iterator = iterator
+        self._queue: queue.Queue = queue.Queue(maxsize=depth)
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._run, args=(iterator,), daemon=True)
+        self._thread.start()
+
+    def _put(self, item: object) -> bool:
+        while not self._stop_event.is_set():
+            try:
+                self._queue.put(item, timeout=0.1)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def _close_iterator(self) -> None:
+        for method_name in ("close", "_shutdown_workers"):
+            method = getattr(self._iterator, method_name, None)
+            if callable(method):
+                try:
+                    method()
+                except Exception:
+                    logging.exception("Failed to close prefetched iterator via %s.", method_name)
+
+    def _run(self, iterator: Iterator) -> None:
+        try:
+            for item in iterator:
+                if not self._put(item):
+                    return
+        except Exception as exc:  # pragma: no cover - surfaced in __next__
+            self._put(exc)
+        finally:
+            self._close_iterator()
+            self._put(self._END)
+
+    def __iter__(self) -> "_PrefetchIterator":
+        return self
+
+    def __next__(self):
+        item = self._queue.get()
+        if item is self._END:
+            raise StopIteration
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def close(self) -> None:
+        self._stop_event.set()
+        if threading.current_thread() is not self._thread:
+            self._thread.join(timeout=1.0)
 
 
 def create_torch_dataset(
@@ -482,6 +544,7 @@ class TorchDataLoader:
         num_workers: int = 0,
         seed: int = 0,
         framework: str = "jax",
+        prefetch_depth: int = 4,
     ):
         """Create a PyTorch data loader.
 
@@ -516,6 +579,8 @@ class TorchDataLoader:
         self._sampler = sampler
         self._dataset = dataset
         self._epoch = 0
+        self._framework = framework
+        self._prefetch_depth = prefetch_depth
 
         mp_context = None
         if num_workers > 0:
@@ -541,7 +606,7 @@ class TorchDataLoader:
     def torch_loader(self) -> torch.utils.data.DataLoader:
         return self._data_loader
 
-    def __iter__(self):
+    def _yield_batches(self):
         num_items = 0
         while True:
             if self._sampler is not None and hasattr(self._sampler, "set_epoch"):
@@ -563,6 +628,17 @@ class TorchDataLoader:
                     yield jax.tree.map(lambda x: jax.make_array_from_process_local_data(self._sharding, x), batch)
                 else:
                     yield jax.tree.map(torch.as_tensor, batch)
+
+    def __iter__(self):
+        iterator = self._yield_batches()
+        if self._framework == "jax" and self._prefetch_depth > 0:
+            prefetched_iterator = _PrefetchIterator(iterator, self._prefetch_depth)
+            try:
+                yield from prefetched_iterator
+            finally:
+                prefetched_iterator.close()
+            return
+        yield from iterator
 
 
 def _collate_fn(items):

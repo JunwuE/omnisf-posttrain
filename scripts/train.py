@@ -2,6 +2,7 @@ import dataclasses
 import functools
 import logging
 import platform
+import time
 from typing import Any
 
 import etils.epath as epath
@@ -15,6 +16,7 @@ import numpy as np
 import optax
 import tqdm_loggable.auto as tqdm
 import wandb
+import os
 
 import openpi.models.model as _model
 import openpi.shared.array_typing as at
@@ -26,6 +28,8 @@ import openpi.training.optimizer as _optimizer
 import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as _weight_loaders
+
+os.environ["WANDB_MODE"]="offline"
 
 
 def init_logging():
@@ -60,9 +64,10 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = 
         wandb.init(id=run_id, resume="must", project=config.project_name)
     else:
         wandb.init(
-            name=config.exp_name,
+            name=config.name,
             config=dataclasses.asdict(config),
             project=config.project_name,
+            id="-".join([config.name, config.exp_name]),
         )
         (ckpt_dir / "wandb_id.txt").write_text(wandb.run.id)
 
@@ -136,6 +141,7 @@ def init_train_state(
 @at.typecheck
 def train_step(
     config: _config.TrainConfig,
+    lr_schedule_fn: optax.Schedule,
     rng: at.KeyArrayLike,
     state: training_utils.TrainState,
     batch: tuple[_model.Observation, _model.Actions],
@@ -158,6 +164,7 @@ def train_step(
     loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)
 
     params = state.params.filter(config.trainable_filter)
+    learning_rate = lr_schedule_fn(state.step)
     updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
     new_params = optax.apply_updates(params, updates)
 
@@ -185,6 +192,7 @@ def train_step(
     )
     info = {
         "loss": loss,
+        "learning_rate": learning_rate,
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
     }
@@ -241,8 +249,9 @@ def main(config: _config.TrainConfig):
     if resuming:
         train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
 
+    lr_schedule_fn = config.lr_schedule.create()
     ptrain_step = jax.jit(
-        functools.partial(train_step, config),
+        functools.partial(train_step, config, lr_schedule_fn),
         in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
         out_shardings=(train_state_sharding, replicated_sharding),
         donate_argnums=(1,),
@@ -257,18 +266,38 @@ def main(config: _config.TrainConfig):
     )
 
     infos = []
+    timing_infos = []
     for step in pbar:
+        train_start = time.perf_counter()
         with sharding.set_mesh(mesh):
             train_state, info = ptrain_step(train_rng, train_state, batch)
+        jax.block_until_ready(info)
+        train_step_s = time.perf_counter() - train_start
         infos.append(info)
+        timing_info = {
+            "train_step_s": train_step_s,
+            "samples_per_s": config.batch_size / train_step_s,
+            "steps_per_h": 3600.0 / train_step_s,
+        }
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
+            if timing_infos:
+                reduced_info.update(
+                    {
+                        key: float(np.mean([info[key] for info in timing_infos]))
+                        for key in timing_infos[0]
+                    }
+                )
             info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
             infos = []
+            timing_infos = []
+        data_wait_start = time.perf_counter()
         batch = next(data_iter)
+        timing_info["data_wait_s"] = time.perf_counter() - data_wait_start
+        timing_infos.append(timing_info)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
             _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
