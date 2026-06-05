@@ -376,9 +376,8 @@ class PadCameraParams(DataTransformFn):
             camera_param.setdefault(intrinsics_key, np.zeros((3, 3), dtype=np.float32))
             camera_param_mask.setdefault(image_key, np.False_)
 
-        if camera_param:
-            data["camera_param"] = camera_param
-            data["camera_param_mask"] = camera_param_mask
+        data["camera_param"] = camera_param
+        data["camera_param_mask"] = camera_param_mask
 
         return data
 

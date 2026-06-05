@@ -39,6 +39,7 @@ os.environ["WANDB_MODE"] = "offline"
 #     print("Waiting for debugger attach")
 #     debugpy.wait_for_client()
 # except Exception as e:
+#     print(f"Failed to set up debugpy: {e}")
 #     pass
 
 

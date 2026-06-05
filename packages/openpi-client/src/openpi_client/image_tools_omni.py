@@ -74,5 +74,7 @@ def _resize_with_pad_pil(image: Image.Image, intri: np.ndarray, height: int, wid
     img_padding_mask[pad_height:pad_height+resized_height, pad_width:pad_width+resized_width] = True
 
     intri[:2, :3] /= ratio
+    intri[0, 2] += pad_width
+    intri[1, 2] += pad_height
 
     return zero_image, img_padding_mask, intri

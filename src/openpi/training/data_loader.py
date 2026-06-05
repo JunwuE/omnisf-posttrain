@@ -267,7 +267,8 @@ def create_rlds_dataset(
 
 
 def transform_dataset(
-    dataset: Dataset,data_config: _config.DataConfig, 
+    dataset: Dataset,
+    data_config: _config.DataConfig, 
     *, 
     skip_norm_stats: bool = False, 
     tail_transforms: Sequence[_transforms.DataTransformFn] = (),
@@ -302,9 +303,12 @@ def create_transformed_single_torch_dataset(
     tail_transforms: Sequence[_transforms.DataTransformFn] = (),
 ) -> Dataset:
     dataset = create_torch_dataset(data_config, action_horizon, model_config)
-    return transform_dataset(dataset, data_config, 
-                             skip_norm_stats=skip_norm_stats,
-                                tail_transforms=tail_transforms,)
+    return transform_dataset(
+        dataset,
+        data_config,
+        skip_norm_stats=skip_norm_stats,
+        tail_transforms=(_transforms.PadCameraParams(), *tail_transforms) if data_config.pad_camera_params else tail_transforms,
+    )
 
 
 def create_transformed_mixed_torch_dataset(

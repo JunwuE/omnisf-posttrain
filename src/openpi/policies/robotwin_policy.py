@@ -15,12 +15,16 @@ _ARM_STATE_DIM = 7
 _ROBOTWIN_URDF_PATH = Path(__file__).resolve().parents[3] / "assets" / "embodiedments" / "arx5_description_isaac.urdf"
 _LEFT_ARM_JOINTS = ("fl_joint1", "fl_joint2", "fl_joint3", "fl_joint4", "fl_joint5", "fl_joint6")
 _RIGHT_ARM_JOINTS = ("fr_joint1", "fr_joint2", "fr_joint3", "fr_joint4", "fr_joint5", "fr_joint6")
+_LEFT_ROOT_JOINT = "fl_joint1"
+_RIGHT_ROOT_JOINT = "fr_joint1"
 _LEFT_EE_JOINT = "fl_joint6"
 _RIGHT_EE_JOINT = "fr_joint6"
 _ROBOTWIN_EE_FRAME = "ee"
-_ROBOTWIN_EE_AXIS_ALIGNMENT = np.array(
-    [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]]
-)
+_ROBOTWIN_EE_AXIS_ALIGNMENT = np.eye(3)
+_CAMERA_PARAM_ZEROS = {
+    "extrinsics": np.zeros((3, 4), dtype=np.float32),
+    "intrinsics": np.zeros((3, 3), dtype=np.float32),
+}
 
 
 def make_robotwin_example() -> dict:
@@ -73,6 +77,9 @@ class RobotwinInputs(transforms.DataTransformFn):
         image_masks = {
             "base_0_rgb": np.True_,
         }
+        camera_name_map = {
+            "base_0_rgb": "cam_high",
+        }
 
         # Add the extra images.
         extra_image_names = {
@@ -86,12 +93,25 @@ class RobotwinInputs(transforms.DataTransformFn):
             else:
                 images[dest] = np.zeros_like(base_image)
                 image_masks[dest] = np.False_
+            camera_name_map[dest] = source
 
         inputs = {
             "image": images,
             "image_mask": image_masks,
             "state": joint_state_to_eef_state(data["state"]) if self.use_eef_action else data["state"],
         }
+
+        # camera parameters are only available during training.
+        if "camera_param" in data:
+            camera_param = {}
+            camera_param_mask = {}
+            for dest, source in camera_name_map.items():
+                if f"{source}_extrinsics" in data["camera_param"] and f"{source}_intrinsics" in data["camera_param"]:
+                    camera_param[f"{dest}_extrinsics"] = np.asarray(data["camera_param"][f"{source}_extrinsics"])
+                    camera_param[f"{dest}_intrinsics"] = np.asarray(data["camera_param"][f"{source}_intrinsics"])
+                    camera_param_mask[dest] = np.True_
+            inputs["camera_param"] = camera_param
+            inputs["camera_param_mask"] = camera_param_mask
 
         # Actions are only available during training.
         if "actions" in data:
@@ -284,8 +304,20 @@ def _rotation_matrix_to_rpy(rotation: np.ndarray) -> np.ndarray:
 
 
 def _align_robotwin_eef_rotation(rotation: np.ndarray) -> np.ndarray:
-    # Match the Agilex-style ee convention: +x forward, +y left, +z up.
+    # Use the raw joint6 frame convention. At zero joints this is approximately
+    # +x forward, +y left, +z up in the Robotwin base/world frame.
     return rotation @ _ROBOTWIN_EE_AXIS_ALIGNMENT
+
+
+@functools.lru_cache(maxsize=1)
+def _robotwin_common_eef_origin() -> np.ndarray:
+    # Common frame origin: midpoint between the two root revolute joints.
+    model = pin.buildModelFromUrdf(str(_ROBOTWIN_URDF_PATH))
+    data = model.createData()
+    pin.framesForwardKinematics(model, data, np.zeros(model.nq))
+    left_root = np.asarray(data.oMf[model.getFrameId(_LEFT_ROOT_JOINT)].translation)
+    right_root = np.asarray(data.oMf[model.getFrameId(_RIGHT_ROOT_JOINT)].translation)
+    return 0.5 * (left_root + right_root)
 
 
 @functools.lru_cache(maxsize=1)
@@ -310,7 +342,7 @@ def _joint_arm_to_eef_arm(arm_state: np.ndarray, *, kinematics: RobotwinPinocchi
     eef_se3 = kinematics.forward_kinematics_se3(arm_state[:_ARM_JOINT_DIM])
     aligned_eef_se3 = pin.SE3(
         _align_robotwin_eef_rotation(np.asarray(eef_se3.rotation)),
-        np.asarray(eef_se3.translation),
+        np.asarray(eef_se3.translation) - _robotwin_common_eef_origin(),
     )
     eef_pose = kinematics.se3_to_pose(aligned_eef_se3)
     return np.concatenate([eef_pose, arm_state[[_ARM_JOINT_DIM]]])

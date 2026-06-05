@@ -141,13 +141,15 @@ class _TorchAlignFeatureShard:
     def _extract_features(self, observation: _model.Observation, reference_tokens: int) -> AlignFeatures:
         with torch.cuda.device(self.device) if self.device.type == "cuda" else contextlib.nullcontext():
             images, img_padding_mask, img_masks = self._prepare_images(observation)
-            vggt_images = preprocess_images_from_openpi(images)
+            # from torchvision.utils import save_image; import matplotlib.cm as cm; import numpy as np; from PIL import Image
+            # save_image(original_img[0,0], 'image.png')
 
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.device.type == "cuda"):
                 if self.target_model == "omnivggt" and getattr(self.config, "use_camera_params", False):
                     extrinsics, intrinsics, camera_param_mask = self._prepare_camera_params(
                         observation, list(observation.images)
                     )
+                    vggt_images, intrinsics = preprocess_images_from_openpi(images, intrinsics)
                     output = self.model(
                         images=vggt_images,
                         extrinsics=extrinsics,
@@ -155,6 +157,7 @@ class _TorchAlignFeatureShard:
                         camera_gt_index=camera_param_mask,
                     )
                 else:
+                    vggt_images = preprocess_images_from_openpi(images)
                     output = self.model(vggt_images)
 
             features = output["features"]

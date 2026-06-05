@@ -102,6 +102,10 @@ class DataConfig:
     # Path to the data filter file for DROID dataset
     filter_dict_path: str | None = None
 
+    # Pad the camera parameters (extrinsics and intrinsics) with 
+    # zeros to match the expected input shape of the model.
+    pad_camera_params: bool = False
+
 
 class GroupFactory(Protocol):
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
@@ -219,7 +223,6 @@ class MixedDataConfig(DataConfig):
 
     components: Sequence[DataConfig] = ()
     weights: Sequence[float] = ()
-    pad_camera_params: bool = False
 
 
 @dataclasses.dataclass(frozen=True)

@@ -233,7 +233,7 @@ def load_and_preprocess_images(image_path_list, mode="crop"):
     return images
 
 
-def preprocess_images_from_openpi(image_list, mode="crop"):
+def preprocess_images_from_openpi(image_list, intrinsics=None, mode="crop"):
     """
     This function convert a list of images provided by openpi (e.g., pi0) to the demanded format for VGGT.
     Mostly, the openpi images are already square, and there is no need to crop or pad them.
@@ -241,8 +241,9 @@ def preprocess_images_from_openpi(image_list, mode="crop"):
 
     Args:
         image_list (list(torch.tensor)): each image in the list is a torch tensor with shape (B, C, H, W)
+        intrinsics (torch.Tensor | None): optional camera intrinsics with shape (..., 3, 3)
     Returns:
-        torch.Tensor: Batched tensor of preprocessed images with shape (B, N, C, H, W)
+        torch.Tensor or tuple[torch.Tensor, torch.Tensor]: preprocessed images, and intrinsics if provided
     """
     # Check for empty list
     if len(image_list) == 0:
@@ -279,6 +280,7 @@ def preprocess_images_from_openpi(image_list, mode="crop"):
     if mode == "crop":
         start_y = (new_height - target_size) // 2
         reshaped_img_list = [img[:, :, start_y : start_y + target_size, :] for img in interpolate_img_list]
+        offset_x, offset_y = 0, -start_y
 
     # For pad mode, pad to make a square of target_size x target_size
     if mode == "pad":
@@ -291,6 +293,7 @@ def preprocess_images_from_openpi(image_list, mode="crop"):
             pad_bottom = h_padding - pad_top
             pad_left = w_padding // 2
             pad_right = w_padding - pad_left
+            offset_x, offset_y = pad_left, pad_top
 
             # Pad with white (value=1.0)
             reshaped_img_list = [
@@ -298,6 +301,16 @@ def preprocess_images_from_openpi(image_list, mode="crop"):
                 for img in interpolate_img_list
             ]
         else:
+            offset_x = offset_y = 0
             reshaped_img_list = interpolate_img_list
 
-    return torch.stack(reshaped_img_list, dim=1)  # [bs, N, C, H, W]
+    images = torch.stack(reshaped_img_list, dim=1)  # [bs, N, C, H, W]
+    if intrinsics is None:
+        return images
+
+    intrinsics = intrinsics.clone()
+    intrinsics[..., 0, :] *= new_width / _width
+    intrinsics[..., 1, :] *= new_height / _height
+    intrinsics[..., 0, 2] += offset_x
+    intrinsics[..., 1, 2] += offset_y
+    return images, intrinsics
