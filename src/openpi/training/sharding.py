@@ -14,13 +14,14 @@ class _MeshState:
     active_mesh: jax.sharding.Mesh | None = None
 
 
-def make_mesh(num_fsdp_devices: int) -> jax.sharding.Mesh:
-    if jax.device_count() % num_fsdp_devices != 0:
+def make_mesh(num_fsdp_devices: int, devices: list[jax.Device] | None = None) -> jax.sharding.Mesh:
+    devices = list(jax.devices() if devices is None else devices)
+    if len(devices) % num_fsdp_devices != 0:
         raise ValueError(
-            f"Number of devices {jax.device_count()} must be divisible by the number of FSDP devices {num_fsdp_devices}."
+            f"Number of devices {len(devices)} must be divisible by the number of FSDP devices {num_fsdp_devices}."
         )
-    mesh_shape = (jax.device_count() // num_fsdp_devices, num_fsdp_devices)
-    return jax.make_mesh(mesh_shape, (BATCH_AXIS, FSDP_AXIS))
+    mesh_shape = (len(devices) // num_fsdp_devices, num_fsdp_devices)
+    return jax.make_mesh(mesh_shape, (BATCH_AXIS, FSDP_AXIS), devices=devices)
 
 
 @contextlib.contextmanager

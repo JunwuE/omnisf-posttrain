@@ -27,7 +27,7 @@ We follow this einsum axis naming convention:
 
 from collections.abc import Sequence
 import dataclasses
-from typing import Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 import einops
 import flax.linen as nn
@@ -50,6 +50,13 @@ class Config:
     num_kv_heads: int
     head_dim: int
     lora_configs: dict[str, lora.LoRAConfig] = dataclasses.field(default_factory=dict)
+
+
+@dataclasses.dataclass(frozen=True)
+class HiddenCaptureSpec:
+    expert_index: int
+    layer_index: int
+    token_count: int | None = None
 
 
 Variant = Literal["dummy", "gemma_300m", "gemma_300m_lora", "gemma_2b", "gemma_2b_lora"]
@@ -290,7 +297,18 @@ class Block(nn.Module):
     dropout_bdims: tuple[int, ...] = ()
 
     @nn.compact
-    def __call__(self, xs, kv_cache, positions, attn_mask, adarms_cond, deterministic=True):  # noqa: FBT002
+    def __call__(
+        self,
+        carry,
+        kv_cache,
+        positions,
+        attn_mask,
+        adarms_cond,
+        deterministic=True,
+        capture_spec: HiddenCaptureSpec | None = None,
+        layer_index=None,
+    ):  # noqa: FBT002
+        xs, capture_state = carry
         xs = sharding.activation_sharding_constraint(xs)
         drop = nn.Dropout(self.dropout, self.dropout_bdims) if self.dropout else lambda x, _: x
 
@@ -330,7 +348,17 @@ class Block(nn.Module):
         xs = [_gated_residual(x, y, gate) for x, y, gate in zip(xs, out, gates, strict=True)]
         xs = sharding.activation_sharding_constraint(xs)
 
-        return xs, kv_cache
+        if capture_spec is not None and capture_state is not None:
+            capture_found, captured_hidden = capture_state
+            hidden = xs[capture_spec.expert_index]
+            if hidden is not None:
+                if capture_spec.token_count is not None:
+                    hidden = hidden[:, :capture_spec.token_count, :]
+                should_capture = jnp.logical_and(layer_index == capture_spec.layer_index, jnp.logical_not(capture_found))
+                captured_hidden = jax.lax.select(should_capture, hidden, captured_hidden)
+                capture_state = (jnp.logical_or(capture_found, should_capture), captured_hidden)
+
+        return (xs, capture_state), kv_cache
 
 
 KVCache: TypeAlias = tuple[at.Float[at.Array, "l b _t _k _h"], at.Float[at.Array, "l b _t _v _h"]]
@@ -359,7 +387,7 @@ class Module(nn.Module):
         block_cls = nn.remat(
             Block,
             prevent_cse=False,
-            static_argnums=(5,),  # 0=self, 6=deterministic
+            static_argnums=(5, 6, 7),  # 5=deterministic, 6=capture_spec, 7=layer_index
             policy=jax.checkpoint_policies.nothing_saveable,
         )
         self.layers = nn.scan(
@@ -372,7 +400,9 @@ class Module(nn.Module):
                 nn.broadcast,
                 nn.broadcast,
                 nn.broadcast,
-            ),  # 0=kv_cache, 1=positions, 2=mask, 3=adarms_cond, 4=deterministic
+                nn.broadcast,
+                0,
+            ),  # 0=kv_cache, 1=positions, 2=mask, 3=adarms_cond, 4=deterministic, 5=capture_spec, 6=layer_index
             length=self.configs[0].depth,
         )(
             configs=self.configs,
@@ -396,19 +426,43 @@ class Module(nn.Module):
         *,
         kv_cache: KVCache | None = None,
         deterministic: bool = True,
-    ) -> tuple[Sequence[at.Float[at.Array, "b _t _d"] | None], KVCache]:
+        hidden_capture: HiddenCaptureSpec | None = None,
+    ) -> Any:
         embedded = jax.tree.map(lambda e: e.astype(self.embed_dtype), embedded)
         mask = jnp.asarray(mask)[:, None, :, :]
         if adarms_cond is None:
             adarms_cond = [None] * len(self.configs)
 
-        embedded, kv_cache = self.layers(embedded, kv_cache, positions, mask, adarms_cond, deterministic)
+        layer_indices = jnp.arange(self.configs[0].depth, dtype=jnp.int32)
+        capture_state = None
+        if hidden_capture is not None:
+            hidden = embedded[hidden_capture.expert_index]
+            token_count = hidden.shape[1] if hidden_capture.token_count is None else hidden_capture.token_count
+            capture_state = (
+                jnp.array(False),
+                jnp.zeros((hidden.shape[0], token_count, hidden.shape[2]), dtype=hidden.dtype),
+            )
+
+        (embedded, capture_state), kv_cache = self.layers(
+            (embedded, capture_state),
+            kv_cache,
+            positions,
+            mask,
+            adarms_cond,
+            deterministic,
+            hidden_capture,
+            layer_indices,
+        )
 
         assert all(e.dtype == jnp.dtype(self.embed_dtype) for e in embedded if e is not None)
 
-        return [
+        outputs = [
             f(e, a)[0] if e is not None else e for f, e, a in zip(self.final_norms, embedded, adarms_cond, strict=True)
-        ], kv_cache
+        ]
+        if hidden_capture is not None:
+            _, captured_hidden = capture_state
+            return outputs, kv_cache, captured_hidden
+        return outputs, kv_cache
 
     def init(self, use_adarms: Sequence[bool]):
         """Convenience method for initializing all parameters, necessary due to the quirks of linen."""
