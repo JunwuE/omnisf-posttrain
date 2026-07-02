@@ -1,3 +1,4 @@
+import collections
 import dataclasses
 import functools
 import logging
@@ -31,6 +32,7 @@ import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as _weight_loaders
 
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 os.environ["WANDB_MODE"] = "offline"
 
 # import debugpy
@@ -100,7 +102,7 @@ def init_train_state(
 
     def init(rng: at.KeyArrayLike, partial_params: at.Params | None = None) -> training_utils.TrainState:
         rng, model_rng = jax.random.split(rng)
-        if not getattr(config, "align_enabled", False):
+        if not config.align_enabled:
             raise ValueError("scripts/train_align.py requires align_enabled=True.")
         model = _pi0_align.Pi0Align(config, rngs=nnx.Rngs(model_rng))
 
@@ -256,9 +258,12 @@ def main(config: _config.TrainConfig):
         config,
         sharding=data_sharding,
         shuffle=True,
+        return_host_batch=True,
     )
     data_iter = iter(data_loader)
-    batch = next(data_iter)
+    data_load_start = time.perf_counter()
+    batch, host_batch = next(data_iter)
+    first_data_load_s = time.perf_counter() - data_load_start
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
     train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
@@ -279,10 +284,35 @@ def main(config: _config.TrainConfig):
     reference_tokens = sum((image.shape[1] // 14) * (image.shape[2] // 14) for image in batch[0].images.values())
     extractor = align_utils.TorchAlignFeatureExtractor(config, devices=device_layout.vggt_device_ids)
     align_worker = align_utils.AsyncAlignFeatureWorker(extractor)
-    align_worker.submit(align_utils.prepare_align_observation(batch[0]), reference_tokens=reference_tokens)
-    align_features = align_worker.result()
+
+    pending_batches: collections.deque[tuple[tuple[_model.Observation, _model.Actions], float]] = collections.deque()
+
+    def submit_align_batch(
+        jax_batch: tuple[_model.Observation, _model.Actions],
+        host_batch: tuple[_model.Observation, _model.Actions],
+        *,
+        data_load_s: float,
+    ) -> None:
+        align_worker.submit(host_batch[0], reference_tokens=reference_tokens)
+        pending_batches.append((jax_batch, data_load_s))
+
+    def load_and_submit_next_batch() -> float:
+        load_start = time.perf_counter()
+        next_jax_batch, next_host_batch = next(data_iter)
+        data_load_s = time.perf_counter() - load_start
+        submit_align_batch(next_jax_batch, next_host_batch, data_load_s=data_load_s)
+        return data_load_s
 
     start_step = int(train_state.step)
+    submitted_steps = start_step
+    if submitted_steps < config.num_train_steps:
+        submit_align_batch(batch, host_batch, data_load_s=first_data_load_s)
+        submitted_steps += 1
+
+    while align_worker.pending_count() < config.align_prefetch_batches and submitted_steps < config.num_train_steps:
+        load_and_submit_next_batch()
+        submitted_steps += 1
+
     pbar = tqdm.tqdm(
         range(start_step, config.num_train_steps),
         initial=start_step,
@@ -294,12 +324,22 @@ def main(config: _config.TrainConfig):
     timing_infos = []
     try:
         for step in pbar:
-            next_batch = next(data_iter)
-            align_worker.submit(align_utils.prepare_align_observation(next_batch[0]), reference_tokens=reference_tokens)
+            step_start = time.perf_counter()
 
             feature_wait_start = time.perf_counter()
-            align_targets, align_mask = _shardalign_utils(align_features, data_sharding)
+            align_features = align_worker.result()
             feature_wait_s = time.perf_counter() - feature_wait_start
+            batch, data_load_s = pending_batches.popleft()
+
+            prefetch_submit_start = time.perf_counter()
+            if submitted_steps < config.num_train_steps:
+                load_and_submit_next_batch()
+                submitted_steps += 1
+            prefetch_submit_s = time.perf_counter() - prefetch_submit_start
+
+            shard_start = time.perf_counter()
+            align_targets, align_mask = _shardalign_utils(align_features, data_sharding)
+            align_shard_s = time.perf_counter() - shard_start
 
             train_start = time.perf_counter()
             with sharding.set_mesh(mesh):
@@ -308,12 +348,22 @@ def main(config: _config.TrainConfig):
             train_step_s = time.perf_counter() - train_start
             infos.append(info)
 
+            step_wall_s = time.perf_counter() - step_start
             timing_info = {
-                "feature_wait_s": feature_wait_s,
+                "align_wait_s": feature_wait_s,
+                "align_compute_s": align_features.compute_s,
+                "align_shard_s": align_shard_s,
+                "data_load_s": data_load_s,
+                "prefetch_submit_s": prefetch_submit_s,
                 "train_step_s": train_step_s,
+                "step_wall_s": step_wall_s,
                 "samples_per_s": config.batch_size / train_step_s,
+                "step_samples_per_s": config.batch_size / step_wall_s,
                 "steps_per_h": 3600.0 / train_step_s,
+                "wall_steps_per_h": 3600.0 / step_wall_s,
             }
+            timing_infos.append(timing_info)
+
             if step % config.log_interval == 0:
                 stacked_infos = common_utils.stack_forest(infos)
                 reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
@@ -324,12 +374,6 @@ def main(config: _config.TrainConfig):
                 wandb.log(reduced_info, step=step)
                 infos = []
                 timing_infos = []
-
-            data_wait_start = time.perf_counter()
-            align_features = align_worker.result()
-            batch = next_batch
-            timing_info["data_wait_s"] = time.perf_counter() - data_wait_start
-            timing_infos.append(timing_info)
 
             if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
                 _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)

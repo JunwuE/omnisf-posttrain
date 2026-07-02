@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import collections
 import concurrent.futures
 import contextlib
 import dataclasses
 import os
+import time
 from typing import Any, Literal
 
-import jax
 import numpy as np
 from safetensors.torch import load_file
 import torch
@@ -16,7 +17,6 @@ from openpi.models import model as _model
 from vggt.heads.utils import custom_pooling
 from vggt.utils.load_fn import preprocess_images_from_openpi
 
-
 AlignTargetModel = Literal["auto", "vggt", "omnivggt"]
 
 
@@ -24,6 +24,7 @@ AlignTargetModel = Literal["auto", "vggt", "omnivggt"]
 class AlignFeatures:
     targets: np.ndarray
     mask: np.ndarray
+    compute_s: float = 0.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -32,23 +33,14 @@ class AlignDeviceLayout:
     vggt_device_ids: list[int]
 
 
-def prepare_align_observation(observation: _model.Observation) -> _model.Observation:
-    """Materialize the observation on host memory for Torch feature extraction.
-
-    This keeps the background align worker from touching sharded JAX arrays directly,
-    which avoids cross-runtime device transfers inside the worker thread.
-    """
-    return jax.device_get(observation)
-
-
 def infer_target_model(config: Any) -> Literal["vggt", "omnivggt"]:
-    target = getattr(config, "align_target_model", "auto")
-    weight_path = getattr(config, "vggt_weight_path", None)
+    target = config.align_target_model
+    weight_path = config.vggt_weight_path
     if target in ("vggt", "omnivggt"):
         return target
-    elif 'omnivggt' in weight_path.lower() and target == "auto":
+    elif "omnivggt" in weight_path.lower() and target == "auto":
         return "omnivggt"
-    elif 'vggt' in weight_path.lower() and target == "auto":
+    elif "vggt" in weight_path.lower() and target == "auto":
         return "vggt"
     else:
         raise ValueError(f"Invalid align_target_model {target} or vggt_weight_path {weight_path}")
@@ -56,18 +48,21 @@ def infer_target_model(config: Any) -> Literal["vggt", "omnivggt"]:
 
 def resolve_align_devices(config: Any) -> AlignDeviceLayout:
     count = torch.cuda.device_count()
-    vggt_devices = getattr(config, "align_vggt_devices", 1)
-    if vggt_devices < 1:
-        raise ValueError(f"align_vggt_devices must be at least 1, got {vggt_devices}.")
-    if vggt_devices >= count:
-        raise ValueError(
-            f"align_vggt_devices must be smaller than the visible CUDA device count {count} so that at least one PI GPU remains."
+    vggt_devices = config.align_vggt_devices if count > 1 else 1
+    vggt_devices = max(1, min(vggt_devices, count))
+    mode = config.align_device_mode
+    if mode == "shared" or count == 1:
+        return AlignDeviceLayout(
+            pi_device_ids=list(range(count)),
+            vggt_device_ids=list(range(count - vggt_devices, count)),
         )
-    split = count - vggt_devices
-    return AlignDeviceLayout(
-        pi_device_ids=list(range(split)),
-        vggt_device_ids=list(range(split, count)),
-    )
+    elif mode == "reserved":
+        return AlignDeviceLayout(
+            pi_device_ids=list(range(count - vggt_devices)),
+            vggt_device_ids=list(range(count - vggt_devices, count)),
+        )
+    else:
+        raise ValueError(f"Invalid align_device_mode {mode}. Must be one of ['shared', 'reserved'].")
 
 
 def _split_batch_ranges(batch_size: int, shard_count: int) -> list[tuple[int, int]]:
@@ -79,6 +74,7 @@ def _concat_align_features(chunks: list[AlignFeatures]) -> AlignFeatures:
     return AlignFeatures(
         targets=np.concatenate([chunk.targets for chunk in chunks], axis=0),
         mask=np.concatenate([chunk.mask for chunk in chunks], axis=0),
+        compute_s=max(chunk.compute_s for chunk in chunks),
     )
 
 
@@ -126,17 +122,20 @@ class _TorchAlignFeatureShard:
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def __call__(self, observation: _model.Observation, *, reference_tokens: int) -> AlignFeatures:
-        chunk_size = getattr(self.config, "align_feature_batch_size", None)
+        start_s = time.perf_counter()
+        chunk_size = self.config.align_feature_batch_size
         batch_size = next(iter(observation.images.values())).shape[0]
-        if chunk_size is not None and 0 < chunk_size < batch_size:
+        if chunk_size is not None and chunk_size < batch_size:
             chunks = []
             for start in range(0, batch_size, chunk_size):
                 stop = min(start + chunk_size, batch_size)
                 chunks.append(self._extract_features(_slice_observation_batch(observation, start, stop), reference_tokens))
-            return _concat_align_features(chunks)
-        return self._extract_features(observation, reference_tokens)
+            features = _concat_align_features(chunks)
+        else:
+            features = self._extract_features(observation, reference_tokens)
+        return dataclasses.replace(features, compute_s=time.perf_counter() - start_s)
 
     def _extract_features(self, observation: _model.Observation, reference_tokens: int) -> AlignFeatures:
         with torch.cuda.device(self.device) if self.device.type == "cuda" else contextlib.nullcontext():
@@ -145,7 +144,7 @@ class _TorchAlignFeatureShard:
             # save_image(original_img[0,0], 'image.png')
 
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.device.type == "cuda"):
-                if self.target_model == "omnivggt" and getattr(self.config, "use_camera_params", False):
+                if self.target_model == "omnivggt" and self.config.use_camera_params:
                     extrinsics, intrinsics, camera_param_mask = self._prepare_camera_params(
                         observation, list(observation.images)
                     )
@@ -195,18 +194,18 @@ class _TorchAlignFeatureShard:
         padding_masks = {}
         image_masks = []
         for key, image in observation.images.items():
-            image_t = torch.as_tensor(np.asarray(image).copy(), device=self.device)
+            image_t = torch.as_tensor(image, device=self.device)
             if image_t.ndim != 4:
                 raise ValueError(f"Expected image {key} to have shape [B,H,W,C], got {image_t.shape}")
             image_t = image_t.to(torch.float32)
             image_t = torch.clamp(image_t / 2.0 + 0.5, 0, 1)
 
-            padding_mask = torch.as_tensor(np.asarray(observation.image_padding_mask[key]).copy(), device=self.device).bool()
-            image_t = image_t.clone() if not (image == 0).all() else torch.ones_like(image_t)  # TODO：用仅双视角做检查
+            padding_mask = torch.as_tensor(observation.image_padding_mask[key], device=self.device).bool()
+            image_t = image_t.clone() if not (image == 0).all() else torch.ones_like(image_t)  # TODO: 用仅双视角做检查
             image_t[~padding_mask] = 1.0
             images.append(image_t.permute(0, 3, 1, 2).contiguous())
             padding_masks[key] = padding_mask
-            image_masks.append(torch.as_tensor(np.asarray(observation.image_masks[key]).copy(), device=self.device).bool())
+            image_masks.append(torch.as_tensor(observation.image_masks[key], device=self.device).bool())
         return images, padding_masks, image_masks
 
     def _prepare_camera_params(self, observation: _model.Observation, image_keys: list[str]):
@@ -214,14 +213,14 @@ class _TorchAlignFeatureShard:
             return None, None, None
         extrinsics = torch.stack(
             [
-                torch.as_tensor(np.asarray(observation.camera_param[f"{key}_extrinsics"]).copy(), device=self.device).float()
+                torch.as_tensor(observation.camera_param[f"{key}_extrinsics"], device=self.device).float()
                 for key in image_keys
             ],
             dim=1,
         )
         intrinsics = torch.stack(
             [
-                torch.as_tensor(np.asarray(observation.camera_param[f"{key}_intrinsics"]).copy(), device=self.device).float()
+                torch.as_tensor(observation.camera_param[f"{key}_intrinsics"], device=self.device).float()
                 for key in image_keys
             ],
             dim=1,
@@ -231,7 +230,7 @@ class _TorchAlignFeatureShard:
             for idx, key in enumerate(image_keys)
             if observation.camera_param_mask
             and key in observation.camera_param_mask
-            and bool(np.asarray(observation.camera_param_mask[key]).all())
+            and bool(observation.camera_param_mask[key].all())
         ]
         return extrinsics, intrinsics, camera_param_mask
 
@@ -246,7 +245,7 @@ class _TorchAlignFeatureShard:
         mask = torch.repeat_interleave(torch.stack(img_masks, dim=1), repeats=tokens_per_img, dim=1)
 
         # useless image padding feature masks for alignment loss
-        if getattr(self.config, "ignore_img_padding_area", True):
+        if self.config.ignore_img_padding_area:
             padding = torch.stack(list(img_padding_mask.values()), dim=1)
             target_size = padding.shape[-1] // 14
             mask_downsampled = F.interpolate(
@@ -254,14 +253,16 @@ class _TorchAlignFeatureShard:
                 size=(target_size, target_size),
                 mode="nearest",
             ).bool().flatten(start_dim=1)
-            if mask_downsampled.shape == mask.shape:
-                mask = mask & mask_downsampled
+            mask = mask & mask_downsampled
         return mask
 
 
 class TorchAlignFeatureExtractor:
     def __init__(self, config: Any, *, devices: list[int]):
         self.config = config
+        # if torch.cuda.is_available():
+        #     torch.backends.cuda.matmul.allow_tf32 = True
+        #     torch.backends.cudnn.allow_tf32 = True
         self.shards = [_TorchAlignFeatureShard(config, device_id=device_id) for device_id in devices]
         self.executor = (
             concurrent.futures.ThreadPoolExecutor(max_workers=len(self.shards)) if len(self.shards) > 1 else None
@@ -274,8 +275,10 @@ class TorchAlignFeatureExtractor:
             shard.close()
 
     def __call__(self, observation: _model.Observation, *, reference_tokens: int) -> AlignFeatures:
+        start_s = time.perf_counter()
         if len(self.shards) == 1:
-            return self.shards[0](observation, reference_tokens=reference_tokens)
+            features = self.shards[0](observation, reference_tokens=reference_tokens)
+            return dataclasses.replace(features, compute_s=time.perf_counter() - start_s)
 
         batch_size = next(iter(observation.images.values())).shape[0]
         ranges = _split_batch_ranges(batch_size, len(self.shards))
@@ -290,7 +293,8 @@ class TorchAlignFeatureExtractor:
                     reference_tokens=reference_tokens,
                 )
             )
-        return _concat_align_features([future.result() for future in futures])
+        features = _concat_align_features([future.result() for future in futures])
+        return dataclasses.replace(features, compute_s=time.perf_counter() - start_s)
 
 
 class AsyncAlignFeatureWorker:
@@ -298,17 +302,16 @@ class AsyncAlignFeatureWorker:
         self.extractor = extractor
         # TODO max_workers=1 is a temporary workaround 
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        self.future: concurrent.futures.Future[AlignFeatures] | None = None
+        self.futures: collections.deque[concurrent.futures.Future[AlignFeatures]] = collections.deque()
 
     def submit(self, observation: _model.Observation, *, reference_tokens: int) -> None:
-        self.future = self.executor.submit(self.extractor, observation, reference_tokens=reference_tokens)
+        self.futures.append(self.executor.submit(self.extractor, observation, reference_tokens=reference_tokens))
 
     def result(self) -> AlignFeatures:
-        if self.future is None:
-            raise RuntimeError("No align feature job has been submitted.")
-        result = self.future.result()
-        self.future = None
-        return result
+        return self.futures.popleft().result()
+
+    def pending_count(self) -> int:
+        return len(self.futures)
 
     def close(self) -> None:
         self.executor.shutdown(wait=True)

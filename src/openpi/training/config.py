@@ -803,11 +803,15 @@ class TrainConfig:
     align_loss_coeff: float = 0.0
     iSF_conv: bool = False
     iSF_zscore: bool = False
-    
+
     align_enabled: bool = False
     align_target_model: Literal["auto", "vggt", "omnivggt"] = "auto"
+    # "shared" means vggt model use the last 'align_vggt_devices' GPUs, while PI model use all visible GPUs.
+    # "reserved" means vggt model use the last 'align_vggt_devices' GPUs, while PI model use other GPUs.
+    align_device_mode: Literal["shared", "reserved"] = "shared"
     align_vggt_devices: int = 1
     align_feature_batch_size: int | None = None
+    align_prefetch_batches: int = 2
 
     # Precision for PyTorch training.
     pytorch_training_precision: Literal["bfloat16", "float32"] = "bfloat16"
