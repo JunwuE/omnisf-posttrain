@@ -16,6 +16,7 @@ _PIPER_URDF_PATH = Path(__file__).resolve().parents[3] / "assets" / "embodiedmen
 _PIPER_LOCKED_JOINTS = ("joint7", "joint8")
 _PIPER_EE_JOINT = "joint6"
 _PIPER_EE_FRAME = "ee"
+_AGILEX_ARM_BASE_DISTANCE = 0.600
 
 
 def make_agilex_example() -> dict:
@@ -283,15 +284,28 @@ def _piper_kinematics() -> PiperPinocchioKinematics:
     return PiperPinocchioKinematics(_PIPER_URDF_PATH)
 
 
-def _joint_arm_to_eef_arm(arm_state: np.ndarray) -> np.ndarray:
+def _agilex_arm_base_offset(*, is_left: bool) -> np.ndarray:
+    # The Piper URDF is single-arm, so FK returns the EEF pose in each arm's
+    # own base frame. Shift positions into the common frame whose origin is the
+    # midpoint between the two arm bases.
+    y_offset = 0.5 * _AGILEX_ARM_BASE_DISTANCE
+    return np.array([0.0, y_offset if is_left else -y_offset, 0.0])
+
+
+def _joint_arm_to_eef_arm(arm_state: np.ndarray, *, is_left: bool) -> np.ndarray:
     kinematics = _piper_kinematics()
-    eef_pose = kinematics.se3_to_pose(kinematics.forward_kinematics_se3(arm_state[:_ARM_JOINT_DIM]))
+    eef_se3 = kinematics.forward_kinematics_se3(arm_state[:_ARM_JOINT_DIM])
+    eef_se3 = pin.SE3(
+        np.asarray(eef_se3.rotation),
+        np.asarray(eef_se3.translation) + _agilex_arm_base_offset(is_left=is_left),
+    )
+    eef_pose = kinematics.se3_to_pose(eef_se3)
     return np.concatenate([eef_pose, arm_state[[_ARM_JOINT_DIM]]])
 
 
 def joint_state_to_eef_state(state: np.ndarray) -> np.ndarray:
-    left = _joint_arm_to_eef_arm(state[:_ARM_STATE_DIM])
-    right = _joint_arm_to_eef_arm(state[_ARM_STATE_DIM:])
+    left = _joint_arm_to_eef_arm(state[:_ARM_STATE_DIM], is_left=True)
+    right = _joint_arm_to_eef_arm(state[_ARM_STATE_DIM:], is_left=False)
     return np.concatenate([left, right])
 
 
