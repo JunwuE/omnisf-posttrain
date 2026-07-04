@@ -1,8 +1,8 @@
 from collections.abc import Iterator, Sequence
-import queue
 import logging
 import multiprocessing
 import os
+import queue
 import threading
 import typing
 from typing import Literal, Protocol, SupportsIndex, TypeVar
@@ -268,9 +268,9 @@ def create_rlds_dataset(
 
 def transform_dataset(
     dataset: Dataset,
-    data_config: _config.DataConfig, 
-    *, 
-    skip_norm_stats: bool = False, 
+    data_config: _config.DataConfig,
+    *,
+    skip_norm_stats: bool = False,
     tail_transforms: Sequence[_transforms.DataTransformFn] = (),
 ) -> Dataset:
     norm_stats = {}
@@ -463,9 +463,8 @@ def create_torch_data_loader(
             skip_norm_stats=skip_norm_stats,
         )
 
-    # Use TorchDataLoader for both frameworks
-    # For PyTorch DDP, create DistributedSampler and divide batch size by world size
-    # For JAX, divide by process count
+    # Use TorchDataLoader for both frameworks. PyTorch DDP and JAX multi-process
+    # both shard the torch dataset with DistributedSampler.
     sampler = None
     if framework == "pytorch":
         if torch.distributed.is_initialized():
@@ -480,7 +479,17 @@ def create_torch_data_loader(
         else:
             local_batch_size = batch_size
     else:
-        local_batch_size = batch_size // jax.process_count()
+        process_count = jax.process_count()
+        if process_count > 1:
+            sampler = torch.utils.data.distributed.DistributedSampler(
+                dataset,
+                num_replicas=process_count,
+                rank=jax.process_index(),
+                shuffle=shuffle,
+                drop_last=True,
+                seed=seed,
+            )
+        local_batch_size = batch_size // process_count
 
     logging.info(f"local_batch_size: {local_batch_size}")
     data_loader = TorchDataLoader(
@@ -575,7 +584,7 @@ class TorchDataLoader:
                 execute in the main process.
             seed: The seed to use for shuffling the data.
         """
-        if jax.process_count() > 1:
+        if jax.process_count() > 1 and sampler is None:
             raise NotImplementedError("Data loading with multiple processes is not supported.")
 
         if len(dataset) < local_batch_size:

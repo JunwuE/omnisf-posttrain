@@ -14,6 +14,7 @@ import orbax.checkpoint.future as future
 from openpi.shared import array_typing as at
 import openpi.shared.normalize as _normalize
 import openpi.training.data_loader as _data_loader
+import openpi.training.distributed as _distributed
 import openpi.training.utils as training_utils
 
 
@@ -22,20 +23,25 @@ def initialize_checkpoint_dir(
 ) -> tuple[ocp.CheckpointManager, bool]:
     checkpoint_dir = epath.Path(checkpoint_dir).resolve()
     resuming = False
-    if checkpoint_dir.exists():
-        if overwrite:
-            checkpoint_dir.rmtree()
-            checkpoint_dir.mkdir(parents=True, exist_ok=True)
-            logging.info(f"Wiped checkpoint directory {checkpoint_dir}")
-        elif resume:
+    checkpoint_exists = checkpoint_dir.exists()
+    if checkpoint_exists:
+        if resume and not overwrite:
             resuming = True
-        else:
+        elif not overwrite:
             raise FileExistsError(
                 f"Checkpoint directory {checkpoint_dir} already exists. Use --overwrite or --resume "
                 "to indicate how to handle it."
             )
 
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    if _distributed.is_primary_process():
+        if checkpoint_exists and overwrite:
+            checkpoint_dir.rmtree()
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            logging.info(f"Wiped checkpoint directory {checkpoint_dir}")
+        else:
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    _distributed.sync_global_devices("checkpoint directory initialized")
 
     mngr = ocp.CheckpointManager(
         checkpoint_dir,

@@ -2,6 +2,7 @@ import collections
 import dataclasses
 import functools
 import logging
+import os
 import platform
 import time
 from typing import Any
@@ -17,7 +18,6 @@ import numpy as np
 import optax
 import tqdm_loggable.auto as tqdm
 import wandb
-import os
 
 import openpi.models.model as _model
 import openpi.models.pi0_align as _pi0_align
@@ -27,6 +27,7 @@ import openpi.training.align_utils as align_utils
 import openpi.training.checkpoints as _checkpoints
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
+import openpi.training.distributed as _distributed
 import openpi.training.optimizer as _optimizer
 import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
@@ -229,11 +230,27 @@ def _shardalign_utils(features: align_utils.AlignFeatures, sharding_spec: jax.sh
 
 def main(config: _config.TrainConfig):
     init_logging()
-    logging.info(f"Running on: {platform.node()}")
+    dist_info = _distributed.initialize()
+    logging.info(
+        "Running on: %s | process=%s/%s",
+        platform.node(),
+        dist_info.process_index,
+        dist_info.process_count,
+    )
 
-    device_layout = align_utils.resolve_align_devices(config)
-    pi_devices = [jax.devices()[idx] for idx in device_layout.pi_device_ids]
-    logging.info("Using PI GPUs %s and VGGT GPUs %s", device_layout.pi_device_ids, device_layout.vggt_device_ids)
+    if dist_info.is_distributed:
+        pi_devices = list(jax.devices())
+        vggt_device_ids = _distributed.local_torch_device_ids(dist_info)
+        logging.info(
+            "Using distributed PI devices %s and local VGGT GPUs %s",
+            [device.id for device in pi_devices],
+            vggt_device_ids,
+        )
+    else:
+        device_layout = align_utils.resolve_align_devices(config)
+        pi_devices = [jax.devices()[idx] for idx in device_layout.pi_device_ids]
+        vggt_device_ids = device_layout.vggt_device_ids
+        logging.info("Using PI GPUs %s and VGGT GPUs %s", device_layout.pi_device_ids, vggt_device_ids)
     if config.batch_size % len(pi_devices) != 0:
         raise ValueError(f"Batch size {config.batch_size} must be divisible by JAX PI device count {len(pi_devices)}.")
 
@@ -252,7 +269,8 @@ def main(config: _config.TrainConfig):
         overwrite=config.overwrite,
         resume=config.resume,
     )
-    init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
+    if dist_info.is_primary:
+        init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
 
     data_loader = _data_loader.create_data_loader(
         config,
@@ -260,6 +278,7 @@ def main(config: _config.TrainConfig):
         shuffle=True,
         return_host_batch=True,
     )
+    _distributed.sync_global_devices("data loader initialized")
     data_iter = iter(data_loader)
     data_load_start = time.perf_counter()
     batch, host_batch = next(data_iter)
@@ -282,7 +301,7 @@ def main(config: _config.TrainConfig):
     )
 
     reference_tokens = sum((image.shape[1] // 14) * (image.shape[2] // 14) for image in batch[0].images.values())
-    extractor = align_utils.TorchAlignFeatureExtractor(config, devices=device_layout.vggt_device_ids)
+    extractor = align_utils.TorchAlignFeatureExtractor(config, devices=vggt_device_ids)
     align_worker = align_utils.AsyncAlignFeatureWorker(extractor)
 
     pending_batches: collections.deque[tuple[tuple[_model.Observation, _model.Actions], float]] = collections.deque()
@@ -313,17 +332,22 @@ def main(config: _config.TrainConfig):
         load_and_submit_next_batch()
         submitted_steps += 1
 
+    show_tqdm = _distributed.show_tqdm(is_primary=dist_info.is_primary)
     pbar = tqdm.tqdm(
         range(start_step, config.num_train_steps),
         initial=start_step,
         total=config.num_train_steps,
         dynamic_ncols=True,
+        disable=not show_tqdm,
     )
 
     infos = []
     timing_infos = []
+    loop_start = time.perf_counter()
     try:
         for step in pbar:
+            if dist_info.is_primary and step == start_step:
+                logging.info("Starting first align train step; JAX compilation may take several minutes.")
             step_start = time.perf_counter()
 
             feature_wait_start = time.perf_counter()
@@ -369,9 +393,18 @@ def main(config: _config.TrainConfig):
                 reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
                 if timing_infos:
                     reduced_info.update({key: float(np.mean([info[key] for info in timing_infos])) for key in timing_infos[0]})
+                time_info = _distributed.progress_time_info(
+                    loop_start=loop_start,
+                    start_step=start_step,
+                    step=step,
+                    total_steps=config.num_train_steps,
+                )
                 info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
-                pbar.write(f"Step {step}: {info_str}")
-                wandb.log(reduced_info, step=step)
+                if dist_info.is_primary:
+                    logging.info("Step %s: %s, %s", step, time_info, info_str)
+                    if show_tqdm:
+                        pbar.write(f"Step {step}: {time_info}, {info_str}")
+                    wandb.log(reduced_info, step=step)
                 infos = []
                 timing_infos = []
 

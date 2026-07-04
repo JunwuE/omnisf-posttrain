@@ -1,6 +1,7 @@
 import dataclasses
 import functools
 import logging
+import os
 import platform
 import time
 from typing import Any
@@ -16,7 +17,6 @@ import numpy as np
 import optax
 import tqdm_loggable.auto as tqdm
 import wandb
-import os
 
 import openpi.models.model as _model
 import openpi.shared.array_typing as at
@@ -24,6 +24,7 @@ import openpi.shared.nnx_utils as nnx_utils
 import openpi.training.checkpoints as _checkpoints
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
+import openpi.training.distributed as _distributed
 import openpi.training.optimizer as _optimizer
 import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
@@ -201,7 +202,13 @@ def train_step(
 
 def main(config: _config.TrainConfig):
     init_logging()
-    logging.info(f"Running on: {platform.node()}")
+    dist_info = _distributed.initialize()
+    logging.info(
+        "Running on: %s | process=%s/%s",
+        platform.node(),
+        dist_info.process_index,
+        dist_info.process_count,
+    )
 
     if config.batch_size % jax.device_count() != 0:
         raise ValueError(
@@ -223,19 +230,21 @@ def main(config: _config.TrainConfig):
         overwrite=config.overwrite,
         resume=config.resume,
     )
-    init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
+    if dist_info.is_primary:
+        init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
 
     data_loader = _data_loader.create_data_loader(
         config,
         sharding=data_sharding,
         shuffle=True,
     )
+    _distributed.sync_global_devices("data loader initialized")
     data_iter = iter(data_loader)
     batch = next(data_iter)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
     # Log images from first batch to sanity check.
-    if jax.device_count() == 1:
+    if dist_info.is_primary and jax.device_count() == 1:
         images_to_log = [
             wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
             for i in range(min(5, len(next(iter(batch[0].images.values())))))
@@ -258,16 +267,21 @@ def main(config: _config.TrainConfig):
     )
 
     start_step = int(train_state.step)
+    show_tqdm = _distributed.show_tqdm(is_primary=dist_info.is_primary)
     pbar = tqdm.tqdm(
         range(start_step, config.num_train_steps),
         initial=start_step,
         total=config.num_train_steps,
         dynamic_ncols=True,
+        disable=not show_tqdm,
     )
 
     infos = []
     timing_infos = []
+    loop_start = time.perf_counter()
     for step in pbar:
+        if dist_info.is_primary and step == start_step:
+            logging.info("Starting first train step; JAX compilation may take several minutes.")
         train_start = time.perf_counter()
         with sharding.set_mesh(mesh):
             train_state, info = ptrain_step(train_rng, train_state, batch)
@@ -289,9 +303,18 @@ def main(config: _config.TrainConfig):
                         for key in timing_infos[0]
                     }
                 )
+            time_info = _distributed.progress_time_info(
+                loop_start=loop_start,
+                start_step=start_step,
+                step=step,
+                total_steps=config.num_train_steps,
+            )
             info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
-            pbar.write(f"Step {step}: {info_str}")
-            wandb.log(reduced_info, step=step)
+            if dist_info.is_primary:
+                logging.info("Step %s: %s, %s", step, time_info, info_str)
+                if show_tqdm:
+                    pbar.write(f"Step {step}: {time_info}, {info_str}")
+                wandb.log(reduced_info, step=step)
             infos = []
             timing_infos = []
         data_wait_start = time.perf_counter()
