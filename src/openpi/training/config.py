@@ -22,6 +22,7 @@ import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
+import openpi.policies.droid_dreamzero_policy as droid_dreamzero_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.policies.agilex_policy as agilex_policy
 import openpi.policies.robotwin_policy as robotwin_policy
@@ -759,6 +760,61 @@ class LeRobotOmniDROIDDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
             action_sequence_keys=("action",),
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotDroidDreamzeroDataConfig(DataConfigFactory):
+    """
+    Data config for Droid-Dreamzero dataset in LeRobot format.
+    https://huggingface.co/datasets/GEAR-Dreams/DreamZero-DROID-Data
+    """
+    # use eef instead of joint as action and state representations.
+    use_eef_action: bool = False
+    # If true, will convert actions to deltas with respect to the current state before passing to the model.
+    # Gripper dimensions will remain in absolute values.
+    use_delta_actions: bool = True
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/exterior_image_1_left": "observation.images.exterior_image_1_left",
+                        "observation/exterior_image_2_left": "observation.images.exterior_image_2_left",
+                        "observation/wrist_image_left": "observation.images.wrist_image_left",
+                        "observation/state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+        # Action keys that will be used to read the action sequence from the dataset.
+        action_sequence_keys: Sequence[str] = ("action",)    
+            
+        data_transforms = _transforms.Group(
+            inputs=[droid_dreamzero_policy.DroidInputs(model_type=model_config.model_type, use_eef_action=self.use_eef_action)],
+            outputs=[droid_dreamzero_policy.DroidOutputs(use_eef_action=self.use_eef_action)],
+        )
+        if self.use_delta_actions:
+            if self.use_eef_action:
+                delta_action_mask = _transforms.make_bool_mask(6, -1)
+            else:
+                delta_action_mask = _transforms.make_bool_mask(7, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=action_sequence_keys,
         )
 
 

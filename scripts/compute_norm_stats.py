@@ -22,6 +22,7 @@ except (ImportError, AttributeError):
     pass
 # End of monkey-patch
 
+from collections.abc import Mapping
 from collections.abc import Sequence
 import dataclasses
 import math
@@ -60,18 +61,25 @@ class StatsRepackTransform(transforms.DataTransformFn):
 
     def __call__(self, data: dict) -> dict:
         flat_item = transforms.flatten_dict(data)
-        flat_structure = transforms.flatten_dict(self.structure)
 
-        output = {}
-        for dest_key, source_key in flat_structure.items():
+        def resolve_source(source_key: str):
             if source_key in flat_item:
-                output[dest_key] = flat_item[source_key]
+                return flat_item[source_key]
             elif source_key in self.visual_source_keys:
-                output[dest_key] = np.zeros(self.dummy_image_shape, dtype=np.uint8)
+                return np.zeros(self.dummy_image_shape, dtype=np.uint8)
             else:
-                raise KeyError(f"Stats repack could not find source key '{source_key}' for '{dest_key}'.")
+                raise KeyError(f"Stats repack could not find source key '{source_key}'.")
 
-        return transforms.unflatten_dict(output)
+        def map_structure(structure):
+            if isinstance(structure, Mapping):
+                return {key: map_structure(value) for key, value in structure.items()}
+            if isinstance(structure, list):
+                return [map_structure(value) for value in structure]
+            if isinstance(structure, tuple):
+                return tuple(map_structure(value) for value in structure)
+            return resolve_source(structure)
+
+        return map_structure(self.structure)
 
 
 class StatsOnlyLeRobotDataset:
