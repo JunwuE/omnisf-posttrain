@@ -27,6 +27,7 @@ import openpi.policies.libero_policy as libero_policy
 import openpi.policies.agilex_policy as agilex_policy
 import openpi.policies.robotwin_policy as robotwin_policy
 import openpi.policies.interndata_policy as interndata_policy
+import openpi.policies.robocoin_policy as robocoin_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -815,6 +816,60 @@ class LeRobotDroidDreamzeroDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
             action_sequence_keys=action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotRobocoinDataConfig(DataConfigFactory):
+    # If true, will convert joint dimensions to deltas with respect to the current state before passing to the model.
+    # Gripper dimensions will remain in absolute values.
+    use_delta_actions: bool = True
+    # use eef instead of joint as action and state representations.
+    use_eef_action: bool = True
+
+    # Repack transforms.
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.cam_head_rgb",
+                        "cam_left_wrist": "observation.images.cam_left_wrist_rgb",
+                        "cam_right_wrist": "observation.images.cam_right_wrist_rgb",
+                    },
+                    "eef_sim_pose_state": "eef_sim_pose_state",
+                    "gripper_open_scale_state": "gripper_open_scale_state",
+                    "eef_sim_pose_action": "eef_sim_pose_action",
+                    "gripper_open_scale_action": "gripper_open_scale_action",
+                    "prompt": "prompt",
+                })
+            ]
+        )
+    )
+    # Action keys that will be used to read the action sequence from the dataset.
+    action_sequence_keys: Sequence[str] = ("eef_sim_pose_action", "gripper_open_scale_action")
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[robocoin_policy.RobocoinInputs(use_eef_action=self.use_eef_action)],
+            outputs=[robocoin_policy.RobocoinOutputs(use_eef_action=self.use_eef_action)],
+        )
+        if self.use_delta_actions:
+            delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
         )
 
 
