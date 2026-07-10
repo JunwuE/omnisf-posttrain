@@ -28,6 +28,7 @@ import openpi.policies.agilex_policy as agilex_policy
 import openpi.policies.robotwin_policy as robotwin_policy
 import openpi.policies.interndata_policy as interndata_policy
 import openpi.policies.robocoin_policy as robocoin_policy
+import openpi.policies.agibotbeta_policy as agibotbeta_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -857,6 +858,74 @@ class LeRobotRobocoinDataConfig(DataConfigFactory):
         )
         if self.use_delta_actions:
             delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotAgibotBetaDataConfig(DataConfigFactory):
+    # If true, will convert joint dimensions to deltas with respect to the current state before passing to the model.
+    # Gripper dimensions will remain in absolute values.
+    use_delta_actions: bool = True
+    # use eef instead of joint as action and state representations.
+    use_eef_action: bool = True
+
+    # Repack transforms.
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.head",
+                        "cam_left_wrist": "observation.images.hand_left",
+                        "cam_right_wrist": "observation.images.hand_right",
+                    },
+                    "grippers": "observation.states.effector.position",
+                    "state_eef_orientation": "observation.states.end.orientation",
+                    "state_eef_position": "observation.states.end.position",
+                    "state_joint": "observation.states.joint.position",
+                    "actions_eef_orientation": "actions.end.orientation",
+                    "actions_eef_position": "actions.end.position",
+                    "actions_joint": "actions.joint.position",
+                    "prompt": "prompt",
+                })
+            ]
+        )
+    )
+    # Action keys that will be used to read the action sequence from the dataset.
+    action_sequence_keys: Sequence[str] = (
+        # The original gripper action value is delayed, while gripper state value is accurate,
+        # therefore we use the observation value as the action target.
+        # Note that gripper value 35 means opening, and 120 means closed.
+        "observation.states.effector.position",
+        "actions.end.orientation",
+        "actions.end.position",
+        "actions.joint.position",
+    )
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[agibotbeta_policy.AgibotBetaInputs(use_eef_action=self.use_eef_action)],
+            outputs=[agibotbeta_policy.AgibotBetaOutputs(use_eef_action=self.use_eef_action)],
+        )
+        if self.use_delta_actions:
+            if self.use_eef_action:
+                delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
+            else:
+                delta_action_mask = _transforms.make_bool_mask(7, -1, 7, -1)
             data_transforms = data_transforms.push(
                 inputs=[_transforms.DeltaActions(delta_action_mask)],
                 outputs=[_transforms.AbsoluteActions(delta_action_mask)],
