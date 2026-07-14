@@ -367,6 +367,8 @@ class LeRobotAgilexDataConfig(DataConfigFactory):
     adapt_to_pi: bool = False
     # use eef instead of joint as action and state representations.
     use_eef_action: bool = False
+    # Convert gripper values to a unified representation (0 = closed, 1 = open).
+    unified_gripper: bool = False
 
     # Repack transforms.
     repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
@@ -391,8 +393,8 @@ class LeRobotAgilexDataConfig(DataConfigFactory):
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         data_transforms = _transforms.Group(
-            inputs=[agilex_policy.AgilexInputs(adapt_to_pi=self.adapt_to_pi, use_eef_action=self.use_eef_action)],
-            outputs=[agilex_policy.AgilexOutputs(adapt_to_pi=self.adapt_to_pi, use_eef_action=self.use_eef_action)],
+            inputs=[agilex_policy.AgilexInputs(adapt_to_pi=self.adapt_to_pi, use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
+            outputs=[agilex_policy.AgilexOutputs(adapt_to_pi=self.adapt_to_pi, use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
         )
         if self.use_delta_joint_actions:
             delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
@@ -483,6 +485,8 @@ class LeRobotInterndataDataConfig(DataConfigFactory):
     adapt_to_pi: bool = False
     # use eef instead of joint as action and state representations.
     use_eef_action: bool = False
+    # Convert gripper values to a unified representation (0 = closed, 1 = open).
+    unified_gripper: bool = False
 
     # Repack transforms.
     repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
@@ -518,8 +522,8 @@ class LeRobotInterndataDataConfig(DataConfigFactory):
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         data_transforms = _transforms.Group(
-            inputs=[interndata_policy.InterndataInputs(adapt_to_pi=self.adapt_to_pi, use_eef_action=self.use_eef_action)],
-            outputs=[interndata_policy.InterndataOutputs(adapt_to_pi=self.adapt_to_pi, use_eef_action=self.use_eef_action)],
+            inputs=[interndata_policy.InterndataInputs(adapt_to_pi=self.adapt_to_pi, use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
+            outputs=[interndata_policy.InterndataOutputs(adapt_to_pi=self.adapt_to_pi, use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
         )
         if self.use_delta_joint_actions:
             delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
@@ -776,6 +780,8 @@ class LeRobotDroidDreamzeroDataConfig(DataConfigFactory):
     # If true, will convert actions to deltas with respect to the current state before passing to the model.
     # Gripper dimensions will remain in absolute values.
     use_delta_actions: bool = True
+    # Convert gripper values to a unified representation (0 = closed, 1 = open).
+    unified_gripper: bool = False    
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -797,8 +803,8 @@ class LeRobotDroidDreamzeroDataConfig(DataConfigFactory):
         action_sequence_keys: Sequence[str] = ("action",)    
             
         data_transforms = _transforms.Group(
-            inputs=[droid_dreamzero_policy.DroidInputs(model_type=model_config.model_type, use_eef_action=self.use_eef_action)],
-            outputs=[droid_dreamzero_policy.DroidOutputs(use_eef_action=self.use_eef_action)],
+            inputs=[droid_dreamzero_policy.DroidInputs(model_type=model_config.model_type, use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
+            outputs=[droid_dreamzero_policy.DroidOutputs(use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
         )
         if self.use_delta_actions:
             if self.use_eef_action:
@@ -827,6 +833,8 @@ class LeRobotRobocoinDataConfig(DataConfigFactory):
     use_delta_actions: bool = True
     # use eef instead of joint as action and state representations.
     use_eef_action: bool = True
+    # Convert gripper values to a unified representation (0 = closed, 1 = open).
+    unified_gripper: bool = False
 
     # Repack transforms.
     repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
@@ -853,8 +861,8 @@ class LeRobotRobocoinDataConfig(DataConfigFactory):
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         data_transforms = _transforms.Group(
-            inputs=[robocoin_policy.RobocoinInputs(use_eef_action=self.use_eef_action)],
-            outputs=[robocoin_policy.RobocoinOutputs(use_eef_action=self.use_eef_action)],
+            inputs=[robocoin_policy.RobocoinInputs(use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
+            outputs=[robocoin_policy.RobocoinOutputs(use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
         )
         if self.use_delta_actions:
             delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
@@ -881,6 +889,8 @@ class LeRobotAgibotBetaDataConfig(DataConfigFactory):
     use_delta_actions: bool = True
     # use eef instead of joint as action and state representations.
     use_eef_action: bool = True
+    # Convert gripper values to a unified representation (0 = closed, 1 = open).
+    unified_gripper: bool = False
 
     # Repack transforms.
     repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
@@ -918,8 +928,8 @@ class LeRobotAgibotBetaDataConfig(DataConfigFactory):
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         data_transforms = _transforms.Group(
-            inputs=[agibotbeta_policy.AgibotBetaInputs(use_eef_action=self.use_eef_action)],
-            outputs=[agibotbeta_policy.AgibotBetaOutputs(use_eef_action=self.use_eef_action)],
+            inputs=[agibotbeta_policy.AgibotBetaInputs(use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
+            outputs=[agibotbeta_policy.AgibotBetaOutputs(use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
         )
         if self.use_delta_actions:
             if self.use_eef_action:

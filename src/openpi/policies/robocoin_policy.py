@@ -54,6 +54,8 @@ class RobocoinInputs(transforms.DataTransformFn):
 
     # Use EEF instead of joint as action and state representations.
     use_eef_action: bool = True
+    # Convert gripper values to a unified representation (0 = closed, 1 = open). Original values is (0 = closed, 1 = open).
+    unified_gripper: bool = False
 
     if not use_eef_action:
         raise NotImplementedError("Joint action representation for RobocoinInputs is not implemented yet.")
@@ -73,6 +75,9 @@ class RobocoinInputs(transforms.DataTransformFn):
 
         eef_state = np.asarray(data['eef_sim_pose_state'])
         gripper_state = np.asarray(data['gripper_open_scale_state'])
+
+        if self.unified_gripper:
+            gripper_state = np.clip(gripper_state, 0.0, 1.0)
 
         state = np.concatenate(
             [
@@ -94,6 +99,10 @@ class RobocoinInputs(transforms.DataTransformFn):
         if "eef_sim_pose_action" in data:
             eef_action = np.asarray(data['eef_sim_pose_action'])
             gripper_action = np.asarray(data['gripper_open_scale_action'])
+
+            if self.unified_gripper:
+                gripper_action = np.clip(gripper_action, 0.0, 1.0)
+
             actions = np.concatenate(
                 [
                     eef_action[..., :6],  # left eef pose
@@ -117,6 +126,9 @@ class RobocoinOutputs(transforms.DataTransformFn):
 
     # Use EEF instead of joint as action and state representations.
     use_eef_action: bool = True
+    # Convert gripper values to a unified representation (0 = closed, 1 = open). Original values is (0 = closed, 1 = open).
+    unified_gripper: bool = False
+    
     if not use_eef_action:
         raise NotImplementedError("Joint action representation for RobocoinOutputs is not implemented yet.")
 

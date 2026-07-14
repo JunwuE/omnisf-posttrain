@@ -48,6 +48,8 @@ class InterndataInputs(transforms.DataTransformFn):
     adapt_to_pi: bool = True
     # Use EEF instead of joint as action and state representations.
     use_eef_action: bool = False
+    # Convert gripper values to a unified representation (0 = closed, 1 = open). Original values is (0 = closed, 0.1 = open).
+    unified_gripper: bool = False
 
     # The expected cameras names. All input cameras must be in this set. Missing cameras will be
     # replaced with black images and the corresponding `image_mask` will be set to False.
@@ -83,6 +85,9 @@ class InterndataInputs(transforms.DataTransformFn):
                 images[dest] = np.zeros_like(base_image)
                 image_masks[dest] = np.False_
 
+        if self.unified_gripper:
+            data["state"][[6, 13]] = 10 * np.clip(data["state"][[6, 13]], 0.0, 0.1)     
+
         inputs = {
             "image": images,
             "image_mask": image_masks,
@@ -101,6 +106,10 @@ class InterndataInputs(transforms.DataTransformFn):
                 axis=-1
             )
             actions = _encode_actions_inv(actions, adapt_to_pi=self.adapt_to_pi)
+
+            if self.unified_gripper:
+                actions[:, [6, 13]] = 10 * np.clip(actions[:, [6, 13]], 0.0, 0.1)
+            
             inputs["actions"] = joint_actions_to_eef_actions(actions) if self.use_eef_action else actions
 
         if "prompt" in data:
@@ -121,10 +130,14 @@ class InterndataOutputs(transforms.DataTransformFn):
     adapt_to_pi: bool = True
     # Use EEF instead of joint as action and state representations.
     use_eef_action: bool = False
+    # Convert gripper values to a unified representation (0 = closed, 1 = open). Original values is (0 = closed, 0.1 = open).
+    unified_gripper: bool = False
 
     def __call__(self, data: dict) -> dict:
         # Only return the first 14 dims.
         actions = np.asarray(data["actions"][:, :14])
+        if self.unified_gripper:
+            actions[:, [6, 13]] = 0.1 * actions[:, [6, 13]]
         return {"actions": _encode_actions(actions, adapt_to_pi=self.adapt_to_pi)}
 
 

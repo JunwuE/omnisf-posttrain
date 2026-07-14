@@ -62,6 +62,8 @@ class DroidInputs(transforms.DataTransformFn):
     model_type: _model.ModelType
     # Use EEF instead of joint as action and state representations.
     use_eef_action: bool = False
+    # Convert gripper values to a unified representation (0 = closed, 1 = open). Original values is (1 = closed, 0 = open).
+    unified_gripper: bool = False   
 
     def __call__(self, data: dict) -> dict:
         # state
@@ -69,6 +71,10 @@ class DroidInputs(transforms.DataTransformFn):
         cartesian_state = raw_state[..., :6]
         gripper_state = raw_state[..., 6:7]
         joint_state = raw_state[..., 7:14]
+
+        if self.unified_gripper:
+            gripper_state = 1 - np.clip(gripper_state, 0, 1)
+
         state = (
             np.concatenate([cartesian_state, gripper_state], axis=-1)
             if self.use_eef_action
@@ -108,6 +114,9 @@ class DroidInputs(transforms.DataTransformFn):
             cartesian_actions = raw_actions[..., :6]
             gripper_actions = raw_actions[..., 12:13]
             joint_actions = raw_actions[..., 14:21]
+
+            if self.unified_gripper:
+                gripper_actions = 1 - np.clip(gripper_actions, 0.0, 1.0)
 
             actions = (
                 np.concatenate([cartesian_actions, gripper_actions], axis=-1)
@@ -207,9 +216,18 @@ class OmniDroidInputs(transforms.DataTransformFn):
 class DroidOutputs(transforms.DataTransformFn):
     # Use EEF instead of joint as action and state representations.
     use_eef_action: bool = False
+    # Convert gripper values to a unified representation (0 = closed, 1 = open). Original values is (1 = closed, 0 = open).
+    unified_gripper: bool = False
 
     def __call__(self, data: dict) -> dict:
         if self.use_eef_action:
-            return {"actions": np.asarray(data["actions"][:, :7])}
+            actions = np.asarray(data["actions"][:, :7])
         else:
-            return {"actions": np.asarray(data["actions"][:, :8])}
+            actions = np.asarray(data["actions"][:, :8])
+
+        if self.unified_gripper:
+            actions[..., -1] = 1 - actions[..., -1]
+        
+        return {"actions": actions}
+        
+

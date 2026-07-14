@@ -34,6 +34,8 @@ class AgibotBetaInputs(transforms.DataTransformFn):
 
     # Use EEF instead of joint as action and state representations.
     use_eef_action: bool = True
+    # Convert gripper values to a unified representation (0 = closed, 1 = open). Original values is (120 = closed, 35 = open).
+    unified_gripper: bool = False
 
     def __call__(self, data: dict) -> dict:
         # Assume that all three-view images always exist.
@@ -49,7 +51,10 @@ class AgibotBetaInputs(transforms.DataTransformFn):
         }
 
         grippers = np.clip(np.asarray(data['grippers']), 35, 120)
-        state_gripper = grippers[0]  # TODO: 35~120 to 0~1 https://github.com/OpenDriveLab/AgiBot-World/blob/manipulation-challenge/UniVLA/prismatic/vla/datasets/dataset_transforms.py#L223
+        if self.unified_gripper:
+            grippers = (120 - grippers) / (120 - 35)
+
+        state_gripper = grippers[0]
 
         if self.use_eef_action:
             state_eef_orientation = np.asarray(data['state_eef_orientation'])
@@ -126,11 +131,20 @@ class AgibotBetaOutputs(transforms.DataTransformFn):
 
     # Use EEF instead of joint as action and state representations.
     use_eef_action: bool = True
+    # Convert gripper values to a unified representation (0 = closed, 1 = open). Original values is (120 = closed, 35 = open).
+    unified_gripper: bool = False
 
     def __call__(self, data: dict) -> dict:
         # Only return the first 14 dims.
         if self.use_eef_action:
             actions = np.asarray(data["actions"][:, :14])
+            if self.unified_gripper:
+                actions[:, 6] = 120 - actions[:, 6] * (120 - 35)
+                actions[:, 13] = 120 - actions[:, 13] * (120 - 35)
         else:
             actions = np.asarray(data["actions"][:, :16])
+            if self.unified_gripper:
+                actions[:, 7] = 120 - actions[:, 7] * (120 - 35)
+                actions[:, 15] = 120 - actions[:, 15] * (120 - 35)
+
         return {"actions": actions}
