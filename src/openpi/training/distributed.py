@@ -15,7 +15,7 @@ class DistributedInfo:
     process_index: int
     local_process_index: int
     coordinator_address: str | None
-    local_device_id: int | None
+    local_device_ids: tuple[int, ...]
 
     @property
     def is_distributed(self) -> bool:
@@ -41,27 +41,41 @@ def _local_device_id(local_process_index: int) -> int:
     return local_process_index
 
 
-def initialize() -> DistributedInfo:
-    """Initialize JAX distributed from Slurm-style environment variables when needed."""
-    global _INITIALIZED  # noqa: PLW0603
-
+def _distributed_info_from_env() -> DistributedInfo:
     process_count = _env_int("JAX_PROCESS_COUNT", _env_int("SLURM_NTASKS", 1))
     process_index = _env_int("JAX_PROCESS_INDEX", _env_int("SLURM_PROCID", 0))
     local_process_index = _env_int("JAX_LOCAL_PROCESS_INDEX", _env_int("SLURM_LOCALID", 0))
-    master_addr = os.environ.get("MASTER_ADDR")
-    master_port = os.environ.get("MASTER_PORT")
+    master_addr = os.environ.get("JAX_COORDINATOR_ADDR", os.environ.get("MASTER_ADDR"))
+    master_port = os.environ.get("JAX_COORDINATOR_PORT", os.environ.get("MASTER_PORT"))
     coordinator_address = f"{master_addr}:{master_port}" if master_addr and master_port else None
-    local_device_id = _local_device_id(local_process_index)
+    local_device_ids = os.environ.get("JAX_LOCAL_DEVICE_IDS")
 
-    if process_count > 1 and not _INITIALIZED:
+    return DistributedInfo(
+        process_count=process_count,
+        process_index=process_index,
+        local_process_index=local_process_index,
+        coordinator_address=coordinator_address,
+        local_device_ids=tuple(map(int, local_device_ids.split(",")))
+        if local_device_ids
+        else (_local_device_id(local_process_index),),
+    )
+
+
+def initialize() -> DistributedInfo:
+    """Initialize JAX distributed from launcher-provided environment variables."""
+    global _INITIALIZED  # noqa: PLW0603
+
+    env_info = _distributed_info_from_env()
+
+    if env_info.process_count > 1 and not _INITIALIZED:
         kwargs = {
-            "num_processes": process_count,
-            "process_id": process_index,
-            "local_device_ids": local_device_id,
+            "num_processes": env_info.process_count,
+            "process_id": env_info.process_index,
+            "local_device_ids": list(env_info.local_device_ids),
             "initialization_timeout": int(os.environ.get("JAX_DISTRIBUTED_INITIALIZATION_TIMEOUT", "600")),
         }
-        if coordinator_address is not None:
-            kwargs["coordinator_address"] = coordinator_address
+        if env_info.coordinator_address is not None:
+            kwargs["coordinator_address"] = env_info.coordinator_address
 
         logging.info("Initializing JAX distributed with %s", kwargs)
         jax.distributed.initialize(**kwargs)
@@ -70,9 +84,9 @@ def initialize() -> DistributedInfo:
     info = DistributedInfo(
         process_count=jax.process_count(),
         process_index=jax.process_index(),
-        local_process_index=local_process_index,
-        coordinator_address=coordinator_address,
-        local_device_id=local_device_id if process_count > 1 else None,
+        local_process_index=env_info.local_process_index,
+        coordinator_address=env_info.coordinator_address,
+        local_device_ids=tuple(device.local_hardware_id for device in jax.local_devices()),
     )
     logging.info(
         "JAX distributed: process=%s/%s local_process=%s local_devices=%s global_devices=%s coordinator=%s",
@@ -91,9 +105,7 @@ def is_primary_process() -> bool:
 
 
 def local_torch_device_ids(info: DistributedInfo) -> list[int]:
-    if not info.is_distributed:
-        return []
-    return [info.local_device_id if info.local_device_id is not None else info.local_process_index]
+    return list(info.local_device_ids)
 
 
 def show_tqdm(*, is_primary: bool) -> bool:
@@ -115,11 +127,7 @@ def progress_time_info(*, loop_start: float, start_step: int, step: int, total_s
     completed_steps = step - start_step + 1
     remaining_steps = total_steps - step - 1
     eta_s = elapsed_s / completed_steps * remaining_steps
-    return (
-        f"progress={step + 1}/{total_steps}, "
-        f"elapsed={_format_duration(elapsed_s)}, "
-        f"eta={_format_duration(eta_s)}"
-    )
+    return f"progress={step + 1}/{total_steps}, elapsed={_format_duration(elapsed_s)}, eta={_format_duration(eta_s)}"
 
 
 def sync_global_devices(name: str) -> None:

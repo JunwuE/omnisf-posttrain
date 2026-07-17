@@ -133,7 +133,8 @@ class ZeroAggregator(Aggregator):
                 depth: torch.Tensor = None,
                 mask: torch.Tensor = None,
                 depth_gt_index: List[int] = [],
-                camera_gt_index: List[int] = []) -> Tuple[List[torch.Tensor], int]:
+                camera_gt_index: List[int] = [],
+                feature_layer: int | None = None) -> Tuple[List[torch.Tensor], int]:
         B, S, C_in, H, W = images.shape
         
         if C_in != 3:
@@ -230,6 +231,9 @@ class ZeroAggregator(Aggregator):
         frame_idx = 0
         global_idx = 0
         output_list = []
+        if feature_layer is not None and feature_layer < 0:
+            feature_layer += self.depth
+        output_layer = 0
 
         for index in range(self.aa_block_num):
             for attn_type in self.aa_order:
@@ -247,10 +251,12 @@ class ZeroAggregator(Aggregator):
 
             for i in range(len(frame_intermediates)):
                 # concat frame and global intermediates, [B x S x P x 2C]
-                concat_inter = torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)
-                output_list.append(concat_inter)
+                if output_layer == feature_layer:
+                    return [torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)], self.patch_start_idx
+                if feature_layer is None:
+                    output_list.append(torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1))
+                output_layer += 1
 
-        del concat_inter
         del frame_intermediates
         del global_intermediates
         return output_list, self.patch_start_idx

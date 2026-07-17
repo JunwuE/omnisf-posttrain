@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import collections
 import concurrent.futures
-import contextlib
 import dataclasses
 import os
 import time
 from typing import Any, Literal
 
+import jax
 import numpy as np
 from safetensors.torch import load_file
 import torch
@@ -22,8 +22,8 @@ AlignTargetModel = Literal["auto", "vggt", "omnivggt"]
 
 @dataclasses.dataclass
 class AlignFeatures:
-    targets: np.ndarray
-    mask: np.ndarray
+    targets: dict[int, torch.Tensor]
+    mask: dict[int, torch.Tensor]
     compute_s: float = 0.0
 
 
@@ -70,24 +70,16 @@ def _split_batch_ranges(batch_size: int, shard_count: int) -> list[tuple[int, in
     return [(int(boundaries[i]), int(boundaries[i + 1])) for i in range(shard_count)]
 
 
-def _concat_align_features(chunks: list[AlignFeatures]) -> AlignFeatures:
-    return AlignFeatures(
-        targets=np.concatenate([chunk.targets for chunk in chunks], axis=0),
-        mask=np.concatenate([chunk.mask for chunk in chunks], axis=0),
-        compute_s=max(chunk.compute_s for chunk in chunks),
-    )
-
-
 class _TorchAlignFeatureShard:
-    def __init__(self, config: Any, *, device_id: int):
+    def __init__(self, config: Any, *, device_id: int, state_dict: dict[str, torch.Tensor]):
         self.config = config
         self.target_model = infer_target_model(config)
         self.device = torch.device(f"cuda:{device_id}")
 
-        self.model = self._load_model().to(self.device)
+        self.model = self._load_model(state_dict).to(self.device)
         self.model.eval()
 
-    def _load_model(self):
+    def _load_model(self, state_dict: dict[str, torch.Tensor]):
         if self.target_model == "omnivggt":
             from omnivggt.models.omnivggt import OmniVGGT
 
@@ -95,14 +87,10 @@ class _TorchAlignFeatureShard:
                 enable_camera=False,
                 enable_point=False,
                 enable_depth=False,
-                feature_only=True,
             )
-            vggt_ckpt_path = os.path.join(self.config.vggt_weight_path, "OmniVGGT.safetensors")
-            if not os.path.exists(vggt_ckpt_path):
-                raise FileNotFoundError(f"OmniVGGT weight file not found at {vggt_ckpt_path}")
-            model.load_state_dict(load_file(vggt_ckpt_path), strict=False)
         else:
             from vggt.models.vggt import VGGT
+
             model = VGGT(
                 enable_camera=False,
                 enable_point=False,
@@ -110,17 +98,12 @@ class _TorchAlignFeatureShard:
                 enable_track=False,
                 feature_only=True,
             )
-            vggt_ckpt_path = os.path.join(self.config.vggt_weight_path, "model.pt")
-            if not os.path.exists(vggt_ckpt_path):
-                raise FileNotFoundError(f"VGGT weight file not found at {vggt_ckpt_path}")
-            model.load_state_dict(torch.load(vggt_ckpt_path), strict=False)
-
+        model.load_state_dict(state_dict, strict=False)
         return model
 
     def close(self) -> None:
         del self.model
-        if self.device.type == "cuda":
-            torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
 
     @torch.inference_mode()
     def __call__(self, observation: _model.Observation, *, reference_tokens: int) -> AlignFeatures:
@@ -128,80 +111,90 @@ class _TorchAlignFeatureShard:
         chunk_size = self.config.align_feature_batch_size
         batch_size = next(iter(observation.images.values())).shape[0]
         if chunk_size is not None and chunk_size < batch_size:
-            chunks = []
-            for start in range(0, batch_size, chunk_size):
-                stop = min(start + chunk_size, batch_size)
-                chunks.append(self._extract_features(_slice_observation_batch(observation, start, stop), reference_tokens))
-            features = _concat_align_features(chunks)
+            chunks = [
+                self._extract_features(
+                    _slice_observation_batch(observation, start, min(start + chunk_size, batch_size)),
+                    reference_tokens,
+                )
+                for start in range(0, batch_size, chunk_size)
+            ]
+            targets = torch.cat([chunk[0] for chunk in chunks])
+            mask = torch.cat([chunk[1] for chunk in chunks])
         else:
-            features = self._extract_features(observation, reference_tokens)
-        return dataclasses.replace(features, compute_s=time.perf_counter() - start_s)
+            targets, mask = self._extract_features(observation, reference_tokens)
+        torch.cuda.synchronize(self.device)
+        return AlignFeatures(
+            targets={self.device.index: targets},
+            mask={self.device.index: mask},
+            compute_s=time.perf_counter() - start_s,
+        )
 
-    def _extract_features(self, observation: _model.Observation, reference_tokens: int) -> AlignFeatures:
-        with torch.cuda.device(self.device) if self.device.type == "cuda" else contextlib.nullcontext():
+    def _extract_features(
+        self, observation: _model.Observation, reference_tokens: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        with torch.cuda.device(self.device):
             images, img_padding_mask, img_masks = self._prepare_images(observation)
-            # from torchvision.utils import save_image; import matplotlib.cm as cm; import numpy as np; from PIL import Image
-            # save_image(original_img[0,0], 'image.png')
 
-            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.device.type == "cuda"):
+            with torch.autocast("cuda", dtype=torch.bfloat16):
                 if self.target_model == "omnivggt" and self.config.use_camera_params:
                     extrinsics, intrinsics, camera_param_mask = self._prepare_camera_params(
                         observation, list(observation.images)
                     )
                     vggt_images, intrinsics = preprocess_images_from_openpi(images, intrinsics)
-                    output = self.model(
+                    features, patch_start_idx = self.model.aggregator(
                         images=vggt_images,
                         extrinsics=extrinsics,
                         intrinsics=intrinsics,
                         camera_gt_index=camera_param_mask,
+                        feature_layer=self.config.vggt_layers_align,
                     )
                 else:
                     vggt_images = preprocess_images_from_openpi(images)
-                    output = self.model(vggt_images)
+                    features, patch_start_idx = self.model.aggregator(
+                        vggt_images, feature_layer=self.config.vggt_layers_align
+                    )
 
-            features = output["features"]
-            patch_start_idx = output["patch_start_idx"]
-            original_img = output["images"]
-            vggt_hidden = [hidden[:, :, patch_start_idx:, :] for hidden in features]
+            vggt_hidden = features[0][:, :, patch_start_idx:, :]
 
-            h, w = original_img.shape[-2:]
+            h, w = vggt_images.shape[-2:]
             patch_h, patch_w = h // self.model.patch_size, w // self.model.patch_size
             reference = torch.zeros(
                 (vggt_images.shape[0], reference_tokens, 1),
-                dtype=vggt_hidden[0].dtype,
+                dtype=vggt_hidden.dtype,
                 device=self.device,
             )
-            pooled_hidden = [
-                custom_pooling(
-                    hidden,
-                    (patch_h, patch_w),
-                    (h, w),
-                    reference,
-                    self.config.pooling_func,
-                    self.config.use_vggt_pe,
-                )
-                for hidden in vggt_hidden
-            ]
-            target = pooled_hidden[self.config.vggt_layers_align].float()
+            target = custom_pooling(
+                vggt_hidden,
+                (patch_h, patch_w),
+                (h, w),
+                reference,
+                self.config.pooling_func,
+                self.config.use_vggt_pe,
+            ).float()
             mask = self._make_align_mask(img_masks, img_padding_mask, reference_tokens)
-            return AlignFeatures(
-                targets=target.detach().cpu().numpy().astype(np.float32),
-                mask=mask.detach().cpu().numpy().astype(np.bool_),
+            return (
+                target.to(torch.bfloat16).contiguous().detach(),
+                mask.contiguous().detach(),
             )
 
-    def _prepare_images(self, observation: _model.Observation) -> tuple[list[torch.Tensor], dict[str, torch.Tensor], list[torch.Tensor]]:
+    def _prepare_images(
+        self, observation: _model.Observation
+    ) -> tuple[list[torch.Tensor], dict[str, torch.Tensor], list[torch.Tensor]]:
         images = []
         padding_masks = {}
         image_masks = []
         for key, image in observation.images.items():
+            empty_image = not np.asarray(image).any()
             image_t = torch.as_tensor(image, device=self.device)
             if image_t.ndim != 4:
                 raise ValueError(f"Expected image {key} to have shape [B,H,W,C], got {image_t.shape}")
-            image_t = image_t.to(torch.float32)
-            image_t = torch.clamp(image_t / 2.0 + 0.5, 0, 1)
+            image_t = (
+                torch.ones_like(image_t, dtype=torch.float32)
+                if empty_image
+                else torch.clamp(image_t.to(torch.float32) / 2.0 + 0.5, 0, 1)
+            )
 
             padding_mask = torch.as_tensor(observation.image_padding_mask[key], device=self.device).bool()
-            image_t = image_t.clone() if not (image == 0).all() else torch.ones_like(image_t)  # TODO: 用仅双视角做检查
             image_t[~padding_mask] = 1.0
             images.append(image_t.permute(0, 3, 1, 2).contiguous())
             padding_masks[key] = padding_mask
@@ -259,11 +252,18 @@ class _TorchAlignFeatureShard:
 
 class TorchAlignFeatureExtractor:
     def __init__(self, config: Any, *, devices: list[int]):
-        self.config = config
-        # if torch.cuda.is_available():
-        #     torch.backends.cuda.matmul.allow_tf32 = True
-        #     torch.backends.cudnn.allow_tf32 = True
-        self.shards = [_TorchAlignFeatureShard(config, device_id=device_id) for device_id in devices]
+        target_model = infer_target_model(config)
+        filename = "OmniVGGT.safetensors" if target_model == "omnivggt" else "model.pt"
+        checkpoint_path = os.path.join(config.vggt_weight_path, filename)
+        state_dict = load_file(checkpoint_path) if target_model == "omnivggt" else torch.load(checkpoint_path, map_location="cpu")
+        self.shards = [
+            _TorchAlignFeatureShard(
+                config,
+                device_id=device_id,
+                state_dict=state_dict,
+            )
+            for device_id in devices
+        ]
         self.executor = (
             concurrent.futures.ThreadPoolExecutor(max_workers=len(self.shards)) if len(self.shards) > 1 else None
         )
@@ -275,11 +275,10 @@ class TorchAlignFeatureExtractor:
             shard.close()
 
     def __call__(self, observation: _model.Observation, *, reference_tokens: int) -> AlignFeatures:
-        start_s = time.perf_counter()
         if len(self.shards) == 1:
-            features = self.shards[0](observation, reference_tokens=reference_tokens)
-            return dataclasses.replace(features, compute_s=time.perf_counter() - start_s)
+            return self.shards[0](observation, reference_tokens=reference_tokens)
 
+        start_s = time.perf_counter()
         batch_size = next(iter(observation.images.values())).shape[0]
         ranges = _split_batch_ranges(batch_size, len(self.shards))
         futures = []
@@ -293,14 +292,60 @@ class TorchAlignFeatureExtractor:
                     reference_tokens=reference_tokens,
                 )
             )
-        features = _concat_align_features([future.result() for future in futures])
-        return dataclasses.replace(features, compute_s=time.perf_counter() - start_s)
+        features = [future.result() for future in futures]
+        return AlignFeatures(
+            targets={device: value for feature in features for device, value in feature.targets.items()},
+            mask={device: value for feature in features for device, value in feature.mask.items()},
+            compute_s=time.perf_counter() - start_s,
+        )
+
+
+def _make_global_array(
+    values: dict[int, torch.Tensor],
+    *,
+    global_batch_size: int,
+    sharding: jax.sharding.Sharding,
+) -> jax.Array:
+    global_shape = (global_batch_size, *next(iter(values.values())).shape[1:])
+    local_devices = list(jax.local_devices())
+    source_positions = [i for i, device in enumerate(local_devices) if device.local_hardware_id in values]
+    devices_by_process = np.asarray(jax.devices(), dtype=object).reshape(jax.process_count(), -1)
+    devices = devices_by_process[:, source_positions].reshape(-1)
+    source_sharding = jax.sharding.NamedSharding(
+        jax.sharding.Mesh(np.asarray(devices), ("align",)),
+        jax.sharding.PartitionSpec("align"),
+    )
+    arrays = [
+        jax.dlpack.from_dlpack(values[local_devices[position].local_hardware_id]) for position in source_positions
+    ]
+    array = jax.make_array_from_single_device_arrays(global_shape, source_sharding, arrays)
+    return jax.device_put(array, sharding)
+
+
+def shard_align_features(
+    features: AlignFeatures,
+    *,
+    sharding: jax.sharding.Sharding,
+    global_batch_size: int,
+) -> tuple[jax.Array, jax.Array, float]:
+    start_s = time.perf_counter()
+    targets = _make_global_array(
+        features.targets,
+        global_batch_size=global_batch_size,
+        sharding=sharding,
+    )
+    mask = _make_global_array(
+        features.mask,
+        global_batch_size=global_batch_size,
+        sharding=sharding,
+    )
+    return targets, mask, time.perf_counter() - start_s
 
 
 class AsyncAlignFeatureWorker:
     def __init__(self, extractor: TorchAlignFeatureExtractor):
         self.extractor = extractor
-        # TODO max_workers=1 is a temporary workaround 
+        # TODO max_workers=1 is a temporary workaround
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self.futures: collections.deque[concurrent.futures.Future[AlignFeatures]] = collections.deque()
 

@@ -181,7 +181,7 @@ class Aggregator(nn.Module):
             if hasattr(self.patch_embed, "mask_token"):
                 self.patch_embed.mask_token.requires_grad_(False)
 
-    def forward(self, images: torch.Tensor) -> Tuple[List[torch.Tensor], int]:
+    def forward(self, images: torch.Tensor, feature_layer: int | None = None) -> Tuple[List[torch.Tensor], int]:
         """
         Args:
             images (torch.Tensor): Input images with shape [B, S, 3, H, W], in range [0, 1].
@@ -233,6 +233,9 @@ class Aggregator(nn.Module):
         frame_idx = 0
         global_idx = 0
         output_list = []
+        if feature_layer is not None and feature_layer < 0:
+            feature_layer += self.depth
+        output_layer = 0
 
         for _ in range(self.aa_block_num):
             for attn_type in self.aa_order:
@@ -249,10 +252,12 @@ class Aggregator(nn.Module):
 
             for i in range(len(frame_intermediates)):
                 # concat frame and global intermediates, [B x S x P x 2C]
-                concat_inter = torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)
-                output_list.append(concat_inter)
+                if output_layer == feature_layer:
+                    return [torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)], self.patch_start_idx
+                if feature_layer is None:
+                    output_list.append(torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1))
+                output_layer += 1
 
-        del concat_inter
         del frame_intermediates
         del global_intermediates
         return output_list, self.patch_start_idx

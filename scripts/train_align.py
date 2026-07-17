@@ -1,4 +1,5 @@
 import collections
+from collections.abc import Callable
 import dataclasses
 import functools
 import logging
@@ -62,6 +63,24 @@ def init_logging():
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     logger.handlers[0].setFormatter(formatter)
+
+
+def _refill_align_prefetch_queue(
+    *,
+    pending_count: Callable[[], int],
+    submit_next: Callable[[], object],
+    submitted_steps: int,
+    num_train_steps: int,
+    target_pending: int,
+    enabled: bool,
+) -> int:
+    if not enabled:
+        return submitted_steps
+
+    while pending_count() < target_pending and submitted_steps < num_train_steps:
+        submit_next()
+        submitted_steps += 1
+    return submitted_steps
 
 
 def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = False, enabled: bool = True):
@@ -221,13 +240,6 @@ def train_step(
     return new_state, info
 
 
-def _shardalign_utils(features: align_utils.AlignFeatures, sharding_spec: jax.sharding.Sharding):
-    return (
-        jax.make_array_from_process_local_data(sharding_spec, features.targets),
-        jax.make_array_from_process_local_data(sharding_spec, features.mask),
-    )
-
-
 def main(config: _config.TrainConfig):
     init_logging()
     dist_info = _distributed.initialize()
@@ -324,12 +336,9 @@ def main(config: _config.TrainConfig):
 
     start_step = int(train_state.step)
     submitted_steps = start_step
+    # Submit only the current batch so the Torch worker is idle during the first JAX CUDA graph capture.
     if submitted_steps < config.num_train_steps:
         submit_align_batch(batch, host_batch, data_load_s=first_data_load_s)
-        submitted_steps += 1
-
-    while align_worker.pending_count() < config.align_prefetch_batches and submitted_steps < config.num_train_steps:
-        load_and_submit_next_batch()
         submitted_steps += 1
 
     show_tqdm = _distributed.show_tqdm(is_primary=dist_info.is_primary)
@@ -346,7 +355,8 @@ def main(config: _config.TrainConfig):
     loop_start = time.perf_counter()
     try:
         for step in pbar:
-            if dist_info.is_primary and step == start_step:
+            is_initial_train_step = step == start_step
+            if dist_info.is_primary and is_initial_train_step:
                 logging.info("Starting first align train step; JAX compilation may take several minutes.")
             step_start = time.perf_counter()
 
@@ -356,14 +366,21 @@ def main(config: _config.TrainConfig):
             batch, data_load_s = pending_batches.popleft()
 
             prefetch_submit_start = time.perf_counter()
-            if submitted_steps < config.num_train_steps:
-                load_and_submit_next_batch()
-                submitted_steps += 1
+            submitted_steps = _refill_align_prefetch_queue(
+                pending_count=align_worker.pending_count,
+                submit_next=load_and_submit_next_batch,
+                submitted_steps=submitted_steps,
+                num_train_steps=config.num_train_steps,
+                target_pending=config.align_prefetch_batches,
+                enabled=not is_initial_train_step,
+            )
             prefetch_submit_s = time.perf_counter() - prefetch_submit_start
 
-            shard_start = time.perf_counter()
-            align_targets, align_mask = _shardalign_utils(align_features, data_sharding)
-            align_shard_s = time.perf_counter() - shard_start
+            align_targets, align_mask, align_transport_s = align_utils.shard_align_features(
+                align_features,
+                sharding=data_sharding,
+                global_batch_size=config.batch_size,
+            )
 
             train_start = time.perf_counter()
             with sharding.set_mesh(mesh):
@@ -372,11 +389,23 @@ def main(config: _config.TrainConfig):
             train_step_s = time.perf_counter() - train_start
             infos.append(info)
 
+            if is_initial_train_step:
+                prefetch_submit_start = time.perf_counter()
+                submitted_steps = _refill_align_prefetch_queue(
+                    pending_count=align_worker.pending_count,
+                    submit_next=load_and_submit_next_batch,
+                    submitted_steps=submitted_steps,
+                    num_train_steps=config.num_train_steps,
+                    target_pending=config.align_prefetch_batches,
+                    enabled=True,
+                )
+                prefetch_submit_s += time.perf_counter() - prefetch_submit_start
+
             step_wall_s = time.perf_counter() - step_start
             timing_info = {
                 "align_wait_s": feature_wait_s,
                 "align_compute_s": align_features.compute_s,
-                "align_shard_s": align_shard_s,
+                "align_transport_s": align_transport_s,
                 "data_load_s": data_load_s,
                 "prefetch_submit_s": prefetch_submit_s,
                 "train_step_s": train_step_s,

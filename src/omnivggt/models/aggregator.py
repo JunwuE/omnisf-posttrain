@@ -10,6 +10,7 @@ import torch.nn as nn
 from typing import Tuple, List
 import random
 import numpy as np
+import os
 
 from omnivggt.layers import PatchEmbed
 from omnivggt.layers.block import Block
@@ -189,8 +190,12 @@ class Aggregator(nn.Module):
             #     self.patch_embed.mask_token.requires_grad_(False)
             
             if patch_embed == "dinov2_vitl14_reg":
-                dinov2_pretrained = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14_reg')
-                self.patch_embed.load_state_dict(dinov2_pretrained.state_dict(), strict=False)
+                dinov2_pretrained_offline = "checkpoints/dinov2/dinov2_vitl14_reg4_pretrain.pth"
+                if os.path.exists(dinov2_pretrained_offline):
+                    self.patch_embed.load_state_dict(torch.load(dinov2_pretrained_offline), strict=False)
+                else:
+                    dinov2_pretrained = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14_reg')
+                    self.patch_embed.load_state_dict(dinov2_pretrained.state_dict(), strict=False)
             elif patch_embed == "dinov2_vitb14_reg":
                 dinov2_pretrained = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14_reg')
                 self.patch_embed.load_state_dict(dinov2_pretrained.state_dict(), strict=True)
@@ -205,6 +210,7 @@ class Aggregator(nn.Module):
     def forward(
         self,
         images: torch.Tensor,
+        feature_layer: int | None = None,
     ) -> Tuple[List[torch.Tensor], int]:
         """
         Args:
@@ -255,6 +261,9 @@ class Aggregator(nn.Module):
         frame_idx = 0
         global_idx = 0
         output_list = []
+        if feature_layer is not None and feature_layer < 0:
+            feature_layer += self.depth
+        output_layer = 0
 
         for _ in range(self.aa_block_num):
             for attn_type in self.aa_order:
@@ -271,10 +280,12 @@ class Aggregator(nn.Module):
 
             for i in range(len(frame_intermediates)):
                 # concat frame and global intermediates, [B x S x P x 2C]
-                concat_inter = torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)
-                output_list.append(concat_inter)
+                if output_layer == feature_layer:
+                    return [torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)], self.patch_start_idx
+                if feature_layer is None:
+                    output_list.append(torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1))
+                output_layer += 1
 
-        del concat_inter
         del frame_intermediates
         del global_intermediates
         return output_list, self.patch_start_idx

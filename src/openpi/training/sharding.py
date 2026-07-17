@@ -14,14 +14,24 @@ class _MeshState:
     active_mesh: jax.sharding.Mesh | None = None
 
 
+def _device_rows(devices: list[jax.Device], num_fsdp_devices: int) -> list[list[jax.Device]]:
+    devices.sort(key=lambda device: (device.process_index, device.local_hardware_id))
+    rows = [devices[start : start + num_fsdp_devices] for start in range(0, len(devices), num_fsdp_devices)]
+    if any(row[0].process_index != row[-1].process_index for row in rows):
+        raise ValueError("FSDP groups must stay within one node")
+    return rows
+
+
 def make_mesh(num_fsdp_devices: int, devices: list[jax.Device] | None = None) -> jax.sharding.Mesh:
     devices = list(jax.devices() if devices is None else devices)
     if len(devices) % num_fsdp_devices != 0:
         raise ValueError(
             f"Number of devices {len(devices)} must be divisible by the number of FSDP devices {num_fsdp_devices}."
         )
-    mesh_shape = (len(devices) // num_fsdp_devices, num_fsdp_devices)
-    return jax.make_mesh(mesh_shape, (BATCH_AXIS, FSDP_AXIS), devices=devices)
+    return jax.sharding.Mesh(
+        np.asarray(_device_rows(devices, num_fsdp_devices), dtype=object),
+        (BATCH_AXIS, FSDP_AXIS),
+    )
 
 
 @contextlib.contextmanager
