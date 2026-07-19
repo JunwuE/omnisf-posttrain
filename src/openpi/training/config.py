@@ -244,6 +244,9 @@ class MixedLeRobotDataConfig(DataConfigFactory):
     sources: Sequence[MixedDataSourceConfig] = ()
     pad_camera_params: bool = False
     use_eef_action: bool = False
+    # If set, overrides the normalization mode for the mixed config and every component.
+    # If None, each component keeps the normalization mode selected by its own factory.
+    use_quantile_norm: bool | None = None
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> MixedDataConfig:
@@ -264,21 +267,31 @@ class MixedLeRobotDataConfig(DataConfigFactory):
                     ),
                 )
                 component = component_factory.create(assets_dirs, model_config)
+                component_use_quantile_norm = (
+                    component.use_quantile_norm
+                    if self.use_quantile_norm is None
+                    else self.use_quantile_norm
+                )
                 components.append(
                     dataclasses.replace(
                         component,
                         asset_id=shared_config.asset_id,
                         norm_stats=shared_config.norm_stats,
-                        use_quantile_norm=shared_config.use_quantile_norm,
+                        use_quantile_norm=component_use_quantile_norm,
                     )
                 )
                 weights.append(source_dataset.weight)
 
+        mixed_use_quantile_norm = (
+            shared_config.use_quantile_norm
+            if self.use_quantile_norm is None
+            else self.use_quantile_norm
+        )
         return MixedDataConfig(
             repo_id=shared_config.repo_id,
             asset_id=shared_config.asset_id,
             norm_stats=shared_config.norm_stats,
-            use_quantile_norm=shared_config.use_quantile_norm,
+            use_quantile_norm=mixed_use_quantile_norm,
             components=components,
             weights=weights,
             pad_camera_params=self.pad_camera_params,

@@ -22,19 +22,21 @@ except (ImportError, AttributeError):
     pass
 # End of monkey-patch
 
-from collections.abc import Mapping
-from collections.abc import Sequence
+from collections import deque
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import Future
+from concurrent.futures import ThreadPoolExecutor
 import dataclasses
 import math
 import multiprocessing
 import pathlib
+from typing import TypeVar
 
+import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
 import numpy as np
 import torch
 import tqdm
 import tyro
-
-import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
 
 import openpi.models.model as _model
 import openpi.shared.normalize as normalize
@@ -57,7 +59,7 @@ class KeepStatsKeys(transforms.DataTransformFn):
 class StatsRepackTransform(transforms.DataTransformFn):
     structure: object
     visual_source_keys: frozenset[str]
-    dummy_image_shape: tuple[int, int, int] = (224, 224, 3)
+    dummy_image_shape: tuple[int, int, int] = (3, 1, 1)
 
     def __call__(self, data: dict) -> dict:
         flat_item = transforms.flatten_dict(data)
@@ -65,10 +67,9 @@ class StatsRepackTransform(transforms.DataTransformFn):
         def resolve_source(source_key: str):
             if source_key in flat_item:
                 return flat_item[source_key]
-            elif source_key in self.visual_source_keys:
+            if source_key in self.visual_source_keys:
                 return np.zeros(self.dummy_image_shape, dtype=np.uint8)
-            else:
-                raise KeyError(f"Stats repack could not find source key '{source_key}'.")
+            raise KeyError(f"Stats repack could not find source key '{source_key}'.")
 
         def map_structure(structure):
             if isinstance(structure, Mapping):
@@ -108,6 +109,32 @@ class StatsOnlyLeRobotDataset:
             if key in column_names
         }
 
+    def _query_hf_dataset_batch(
+        self,
+        items: list[dict],
+        query_indices: list[dict[str, list[int]]],
+    ) -> None:
+        column_names = set(self._hf_dataset.column_names)
+        query_specs: dict[tuple[int, ...], list[tuple[str, list[int]]]] = {}
+        for key in query_indices[0]:
+            if key not in column_names:
+                continue
+            per_item_indices = [indices[key] for indices in query_indices]
+            flat_indices = tuple(index for indices in per_item_indices for index in indices)
+            query_specs.setdefault(flat_indices, []).append(
+                (key, [len(indices) for indices in per_item_indices])
+            )
+
+        for flat_indices, specs in query_specs.items():
+            keys = [key for key, _ in specs]
+            query_batch = self._hf_dataset.select_columns(keys)[list(flat_indices)]
+            for key, lengths in specs:
+                offset = 0
+                for item, length in zip(items, lengths, strict=True):
+                    values = query_batch[key][offset : offset + length]
+                    item[key] = torch.stack([torch.as_tensor(value) for value in values])
+                    offset += length
+
     def __getitem__(self, idx) -> dict:
         item = self._hf_dataset[idx]
         episode_index = item["episode_index"]
@@ -124,6 +151,38 @@ class StatsOnlyLeRobotDataset:
 
         return item
 
+    def __getitems__(self, indices: Sequence[int]) -> list[dict]:
+        sample_indices = [int(index) for index in indices]
+        if not sample_indices:
+            return []
+
+        raw_batch = self._hf_dataset[sample_indices]
+        items = [{} for _ in sample_indices]
+        for key, values in raw_batch.items():
+            if len(values) != len(items):
+                raise ValueError(f"Batched HuggingFace column '{key}' has an unexpected length.")
+            for item, value in zip(items, values, strict=True):
+                item[key] = value
+
+        if self._dataset.delta_indices is not None:
+            query_indices = []
+            for item, sample_index in zip(items, sample_indices, strict=True):
+                episode_index = item["episode_index"]
+                episode_index = int(episode_index.item() if hasattr(episode_index, "item") else episode_index)
+                item_query_indices, padding = self._dataset._get_query_indices(  # noqa: SLF001
+                    sample_index, episode_index
+                )
+                item.update(padding)
+                query_indices.append(item_query_indices)
+            self._query_hf_dataset_batch(items, query_indices)
+
+        for item in items:
+            task_index = item.get("task_index")
+            if task_index is not None:
+                task_index = int(task_index.item() if hasattr(task_index, "item") else task_index)
+                item["task"] = self._dataset.meta.tasks[task_index]
+        return items
+
     def __len__(self) -> int:
         return len(self._hf_dataset)
 
@@ -132,6 +191,38 @@ class StatsOnlyLeRobotDataset:
 class ComponentSamplingPlan:
     quota: int
     per_sample_weight: float
+
+
+@dataclasses.dataclass(frozen=True)
+class MixedComponentBatch:
+    component_index: int
+    plan: ComponentSamplingPlan
+    batch: dict
+
+
+@dataclasses.dataclass(frozen=True)
+class _MixedBatchTask:
+    component_index: int
+    repo_id: str | None
+    dataset: _data_loader.Dataset
+    sample_indices: Sequence[int]
+    plan: ComponentSamplingPlan
+    is_last_chunk: bool
+    use_batch_access: bool
+
+
+@dataclasses.dataclass(frozen=True)
+class _LoadedMixedChunk:
+    component_index: int
+    repo_id: str | None
+    plan: ComponentSamplingPlan
+    items: list[dict]
+    is_last_chunk: bool
+
+
+_InputT = TypeVar("_InputT")
+_OutputT = TypeVar("_OutputT")
+_MIXED_READ_CHUNK_SIZE = 512
 
 
 class WeightedRunningStats:
@@ -404,10 +495,7 @@ def allocate_component_sampling_plans(
     if max_frames is not None and max_frames < 0:
         raise ValueError("max_frames must be non-negative.")
 
-    if max_frames is None:
-        quotas = dataset_lengths.copy()
-    else:
-        quotas = np.minimum(dataset_lengths, max_frames)
+    quotas = dataset_lengths.copy() if max_frames is None else np.minimum(dataset_lengths, max_frames)
 
     # Match training-time mixed sampling, where component probability is
     # proportional to len(component) * weight.
@@ -463,6 +551,262 @@ def create_mixed_component_dataloader(
     )
 
 
+def _bounded_ordered_map(
+    executor: ThreadPoolExecutor | None,
+    function: Callable[[_InputT], _OutputT],
+    items: Iterable[_InputT],
+    *,
+    max_pending: int,
+) -> Iterator[_OutputT]:
+    """Run work concurrently while yielding results in input order."""
+    if executor is None:
+        for item in items:
+            yield function(item)
+        return
+
+    item_iterator = iter(items)
+    pending: deque[Future[_OutputT]] = deque()
+
+    def submit_next() -> bool:
+        try:
+            item = next(item_iterator)
+        except StopIteration:
+            return False
+        pending.append(executor.submit(function, item))
+        return True
+
+    for _ in range(max_pending):
+        if not submit_next():
+            break
+
+    try:
+        while pending:
+            future = pending.popleft()
+            result = future.result()
+            submit_next()
+            yield result
+    finally:
+        for future in pending:
+            future.cancel()
+
+
+def _create_mixed_component_dataset_with_context(
+    args: tuple[int, int, _config.DataConfig, int, _model.BaseModelConfig],
+) -> _data_loader.Dataset:
+    component_index, num_components, component, action_horizon, model_config = args
+    try:
+        return create_mixed_component_dataset(component, action_horizon, model_config)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to initialize mixed dataset component {component_index + 1}/{num_components} "
+            f"(repo_id={component.repo_id!r})."
+        ) from exc
+
+
+def _iter_mixed_batch_tasks(
+    data_config: _config.MixedDataConfig,
+    datasets: Sequence[_data_loader.Dataset],
+    plans: Sequence[ComponentSamplingPlan],
+    batch_size: int,
+    seed: int,
+    *,
+    use_batch_access: bool,
+) -> Iterator[_MixedBatchTask]:
+    for component_index, (dataset, plan) in enumerate(zip(datasets, plans, strict=True)):
+        if plan.quota == 0:
+            continue
+
+        if plan.quota < len(dataset):
+            sample_indices: Sequence[int] = select_sample_indices(
+                len(dataset), plan.quota, seed, component_index
+            )
+        else:
+            sample_indices = range(len(dataset))
+
+        component_repo_id = data_config.components[component_index].repo_id
+        for batch_start in range(0, plan.quota, batch_size):
+            batch_end = min(batch_start + batch_size, plan.quota)
+            for chunk_start in range(batch_start, batch_end, _MIXED_READ_CHUNK_SIZE):
+                chunk_end = min(chunk_start + _MIXED_READ_CHUNK_SIZE, batch_end)
+                yield _MixedBatchTask(
+                    component_index=component_index,
+                    repo_id=component_repo_id,
+                    dataset=dataset,
+                    sample_indices=sample_indices[chunk_start:chunk_end],
+                    plan=plan,
+                    is_last_chunk=chunk_end == batch_end,
+                    use_batch_access=use_batch_access,
+                )
+
+
+def _get_dataset_items(
+    dataset: _data_loader.Dataset,
+    sample_indices: Sequence[int],
+    *,
+    use_batch_access: bool,
+) -> list[dict]:
+    if isinstance(dataset, _data_loader.TransformedDataset):
+        items = _get_dataset_items(
+            dataset._dataset,  # noqa: SLF001
+            sample_indices,
+            use_batch_access=use_batch_access,
+        )
+        return [dataset._transform(item) for item in items]  # noqa: SLF001
+
+    getitems = getattr(dataset, "__getitems__", None)
+    if use_batch_access and callable(getitems):
+        return list(getitems(sample_indices))
+    return [dataset[int(index)] for index in sample_indices]
+
+
+def _load_mixed_component_chunk(task: _MixedBatchTask) -> _LoadedMixedChunk:
+    try:
+        items = _get_dataset_items(
+            task.dataset,
+            task.sample_indices,
+            use_batch_access=task.use_batch_access,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to load samples from mixed dataset component {task.component_index + 1} "
+            f"(repo_id={task.repo_id!r})."
+        ) from exc
+    return _LoadedMixedChunk(
+        component_index=task.component_index,
+        repo_id=task.repo_id,
+        plan=task.plan,
+        items=items,
+        is_last_chunk=task.is_last_chunk,
+    )
+
+
+def _combine_mixed_component_chunks(chunks: Iterable[_LoadedMixedChunk]) -> Iterator[MixedComponentBatch]:
+    batch_items: list[dict] = []
+    for chunk in chunks:
+        batch_items.extend(chunk.items)
+        if not chunk.is_last_chunk:
+            continue
+        try:
+            batch = _data_loader._collate_fn(batch_items)  # noqa: SLF001
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to collate samples from mixed dataset component {chunk.component_index + 1} "
+                f"(repo_id={chunk.repo_id!r})."
+            ) from exc
+        yield MixedComponentBatch(component_index=chunk.component_index, plan=chunk.plan, batch=batch)
+        batch_items = []
+
+    if batch_items:
+        raise RuntimeError("Mixed dataset batch ended without a final read chunk.")
+
+
+def iter_mixed_component_batches(
+    data_config: _config.MixedDataConfig,
+    action_horizon: int,
+    batch_size: int,
+    model_config: _model.BaseModelConfig,
+    num_workers: int,
+    max_frames: int | None = None,
+    seed: int = 0,
+    *,
+    show_progress: bool = True,
+) -> Iterator[MixedComponentBatch]:
+    """Load mixed-dataset batches concurrently and yield them in serial order.
+
+    For mixed norm stats, ``num_workers`` controls the global component-initialization
+    pool. Batch reads use vectorized HuggingFace indexing in serial order because
+    concurrent access to one Arrow dataset is slower and consumes substantially more
+    memory. Statistics remain deterministic across worker counts.
+    """
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+    if num_workers < 0:
+        raise ValueError("num_workers must be non-negative.")
+    if len(data_config.components) != len(data_config.weights):
+        raise ValueError("Mixed dataset components and weights must have the same length.")
+    normalize_weights(data_config.weights)
+
+    num_components = len(data_config.components)
+    if num_components == 0:
+        raise ValueError("Mixed dataset must contain at least one component.")
+
+    initialization_workers = num_workers
+    executor = (
+        ThreadPoolExecutor(max_workers=initialization_workers, thread_name_prefix="norm-stats-init")
+        if initialization_workers
+        else None
+    )
+    max_pending = max(1, 2 * initialization_workers)
+
+    try:
+        dataset_args = (
+            (component_index, num_components, component, action_horizon, model_config)
+            for component_index, component in enumerate(data_config.components)
+        )
+        dataset_iterator = _bounded_ordered_map(
+            executor,
+            _create_mixed_component_dataset_with_context,
+            dataset_args,
+            max_pending=max_pending,
+        )
+        datasets = list(
+            tqdm.tqdm(
+                dataset_iterator,
+                total=num_components,
+                desc="Loading components",
+                disable=not show_progress,
+            )
+        )
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+            executor = None
+
+        plans = allocate_component_sampling_plans(
+            [len(dataset) for dataset in datasets],
+            data_config.weights,
+            max_frames,
+        )
+        batch_tasks = _iter_mixed_batch_tasks(
+            data_config,
+            datasets,
+            plans,
+            batch_size,
+            seed,
+            use_batch_access=num_workers > 0,
+        )
+        chunk_iterator = _bounded_ordered_map(
+            None,
+            _load_mixed_component_chunk,
+            batch_tasks,
+            max_pending=1,
+        )
+        batch_iterator = _combine_mixed_component_chunks(chunk_iterator)
+        total_batches = sum(math.ceil(plan.quota / batch_size) for plan in plans if plan.quota > 0)
+        progress = tqdm.tqdm(
+            batch_iterator,
+            total=total_batches,
+            desc="Computing stats",
+            disable=not show_progress,
+        )
+        previous_component_index = -1
+        for component_batch in progress:
+            if component_batch.component_index != previous_component_index:
+                component_index = component_batch.component_index
+                plan = component_batch.plan
+                component_repo_id = data_config.components[component_index].repo_id
+                if show_progress:
+                    tqdm.tqdm.write(
+                        f"Component {component_index + 1}/{num_components}: repo_id={component_repo_id}, "
+                        f"quota={plan.quota}, batch_size={batch_size}, initialization_workers={num_workers}, "
+                        f"num_batches={math.ceil(plan.quota / batch_size)}"
+                    )
+                previous_component_index = component_index
+            yield component_batch
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+
+
 def compute_mixed_torch_norm_stats(
     data_config: _config.MixedDataConfig,
     action_horizon: int,
@@ -472,40 +816,23 @@ def compute_mixed_torch_norm_stats(
     max_frames: int | None = None,
     seed: int = 0,
 ) -> dict[str, normalize.NormStats]:
-    datasets = [
-        create_mixed_component_dataset(component, action_horizon, model_config) for component in data_config.components
-    ]
-    # Mixed configs cap each expanded component independently and weight them
-    # like training-time WeightedMixedDataset, using len(component) * weight.
-    plans = allocate_component_sampling_plans(
-        [len(dataset) for dataset in datasets],
-        data_config.weights,
-        max_frames,
-    )
-
     keys = ["state", "actions"]
     stats = {key: WeightedRunningStats() for key in keys}
-
-    for component_index, (dataset, plan) in enumerate(zip(datasets, plans, strict=True)):
-        if plan.quota == 0:
-            continue
-
-        selected_dataset = dataset
-        if plan.quota < len(dataset):
-            indices = select_sample_indices(len(dataset), plan.quota, seed, component_index)
-            selected_dataset = torch.utils.data.Subset(dataset, indices.tolist())
-
-        component_repo_id = data_config.components[component_index].repo_id
-        data_loader = create_mixed_component_dataloader(selected_dataset, batch_size, num_workers)
-        num_batches = math.ceil(plan.quota / batch_size)
-        print(
-            f"Component {component_index + 1}/{len(datasets)}: "
-            f"repo_id={component_repo_id}, quota={plan.quota}, batch_size={batch_size}, "
-            f"num_workers={num_workers}, num_batches={num_batches}"
-        )
-        for batch in tqdm.tqdm(data_loader, total=num_batches, desc="Computing stats"):
-            for key in keys:
-                stats[key].update(np.asarray(batch[key]), sample_weight=plan.per_sample_weight)
+    batches = iter_mixed_component_batches(
+        data_config,
+        action_horizon,
+        batch_size,
+        model_config,
+        num_workers,
+        max_frames=max_frames,
+        seed=seed,
+    )
+    for component_batch in batches:
+        for key in keys:
+            stats[key].update(
+                np.asarray(component_batch.batch[key]),
+                sample_weight=component_batch.plan.per_sample_weight,
+            )
 
     return {key: stats[key].get_statistics() for key in keys}
 
