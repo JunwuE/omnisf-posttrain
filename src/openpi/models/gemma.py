@@ -133,9 +133,11 @@ class RMSNorm(nn.Module):
 
         # adaptive RMSNorm
         modulation = nn.Dense(x.shape[-1] * 3, kernel_init=nn.initializers.zeros, dtype=dtype)(cond)
+        modulation = sharding.activation_sharding_constraint(modulation)
         scale, shift, gate = jnp.split(modulation[:, None, :], 3, axis=-1)
         normed_inputs = normed_inputs * (1 + scale) + shift  # scale and shift in float32
-        return normed_inputs.astype(dtype), gate
+        normed_inputs, gate = sharding.activation_sharding_constraint((normed_inputs.astype(dtype), gate))
+        return normed_inputs, gate
 
 
 @at.typecheck

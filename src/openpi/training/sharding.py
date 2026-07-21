@@ -9,6 +9,16 @@ FSDP_AXIS = "fsdp"
 # In FSDP, we shard the data across both the batch and FSDP axes.
 DATA_AXIS = (BATCH_AXIS, FSDP_AXIS)
 
+# These adaptive RMSNorm projections operate on data-sharded activations. Sharding their output dimension makes XLA
+# transpose the activation layout during the backward pass and replicate it across data-parallel groups.
+_REPLICATED_FSDP_PATH_PARTS = (
+    "['final_norm_1']['Dense_0']['kernel']",
+    "['pre_attention_norm_1']['Dense_0']['kernel']",
+    "['pre_ffw_norm_1']['Dense_0']['kernel']",
+    "['time_mlp_in']['kernel']",
+    "['time_mlp_out']['kernel']",
+)
+
 
 class _MeshState:
     active_mesh: jax.sharding.Mesh | None = None
@@ -52,7 +62,8 @@ def activation_sharding_constraint(pytree):
     if _MeshState.active_mesh is None:
         return pytree
     return jax.lax.with_sharding_constraint(
-        pytree, jax.sharding.NamedSharding(_MeshState.active_mesh, jax.sharding.PartitionSpec(DATA_AXIS))
+        pytree,
+        jax.sharding.NamedSharding(_MeshState.active_mesh, jax.sharding.PartitionSpec(DATA_AXIS)),
     )
 
 
@@ -79,6 +90,11 @@ def fsdp_sharding(
     min_size_bytes = min_size_mbytes * 2**20
 
     def _shard_arr(kp, array: jax.ShapeDtypeStruct):
+        path = jax.tree_util.keystr(kp)
+        if any(part in path for part in _REPLICATED_FSDP_PATH_PARTS):
+            if log:
+                logging.info("Replicating %s to preserve data-sharded adaptive RMSNorm activations", path)
+            return jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
         # if fsdp is not actually going to be used, replicate everything to avoid extraneous logging
         if mesh.shape[FSDP_AXIS] == 1:
             return jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
@@ -97,16 +113,14 @@ def fsdp_sharding(
         for i in axes:
             if array.shape[i] % mesh.shape[FSDP_AXIS] == 0:
                 if log:
-                    logging.info(
-                        f"Sharding {jax.tree_util.keystr(kp)} of shape {array.shape} ({arr_size / 2**20:.2f} MiB) along axis {i}"
-                    )
+                    logging.info(f"Sharding {path} of shape {array.shape} ({arr_size / 2**20:.2f} MiB) along axis {i}")
                 spec[i] = FSDP_AXIS
                 return jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(*spec))
 
         # replicate if no valid sharding was found
         if log:
             logging.warning(
-                f"Could not find a valid sharding for {jax.tree_util.keystr(kp)} of shape {array.shape} with mesh of shape {mesh.shape}"
+                f"Could not find a valid sharding for {path} of shape {array.shape} with mesh of shape {mesh.shape}"
             )
         return jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 

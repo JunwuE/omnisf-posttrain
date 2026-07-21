@@ -6,6 +6,8 @@ import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
 
+import openpi.training.sharding as sharding
+
 
 class AlignProjector(nnx.Module):
     """Project VLA image-token embeddings and compute cosine alignment loss."""
@@ -34,8 +36,10 @@ class AlignProjector(nnx.Module):
         if self.vlm_norm is not None:
             llm_embedding = self.vlm_norm(llm_embedding)
         projected = self.fc1(llm_embedding)
+        projected = sharding.activation_sharding_constraint(projected)
         projected = jax.nn.gelu(projected)
-        return self.fc2(projected)
+        projected = self.fc2(projected)
+        return sharding.activation_sharding_constraint(projected)
 
     def __call__(
         self,
@@ -46,6 +50,7 @@ class AlignProjector(nnx.Module):
         if llm_embs.ndim != 3:
             raise ValueError(f"Expected llm_embs rank 3 [batch, token, dim], got shape {llm_embs.shape}.")
 
+        llm_embs, target_emb, align_mask = sharding.activation_sharding_constraint((llm_embs, target_emb, align_mask))
         llm_emb = self.align_dimension(llm_embs)
         target_emb = target_emb.astype(llm_emb.dtype)
         if self.iSF_zscore:
@@ -53,8 +58,10 @@ class AlignProjector(nnx.Module):
 
         llm_emb = llm_emb.astype(jnp.float32)
         target_emb = target_emb.astype(jnp.float32)
+        llm_emb, target_emb = sharding.activation_sharding_constraint((llm_emb, target_emb))
         llm_emb = llm_emb / jnp.maximum(jnp.linalg.norm(llm_emb, axis=-1, keepdims=True), 1e-6)
         target_emb = target_emb / jnp.maximum(jnp.linalg.norm(target_emb, axis=-1, keepdims=True), 1e-6)
+        llm_emb, target_emb = sharding.activation_sharding_constraint((llm_emb, target_emb))
 
         per_token_loss = 1.0 - jnp.sum(llm_emb * target_emb, axis=-1)
         align_mask = align_mask.astype(jnp.float32)

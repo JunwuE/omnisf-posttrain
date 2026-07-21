@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import collections
+from collections.abc import Iterable
 import concurrent.futures
 import dataclasses
+import math
 import os
 import time
 from typing import Any, Literal
@@ -25,6 +26,7 @@ class AlignFeatures:
     targets: dict[int, torch.Tensor]
     mask: dict[int, torch.Tensor]
     compute_s: float = 0.0
+    compute_started_s: float | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -70,6 +72,45 @@ def _split_batch_ranges(batch_size: int, shard_count: int) -> list[tuple[int, in
     return [(int(boundaries[i]), int(boundaries[i + 1])) for i in range(shard_count)]
 
 
+def _balanced_chunk_ranges(batch_size: int, max_chunk_size: int | None) -> list[tuple[int, int]]:
+    if batch_size <= 0:
+        return []
+    if max_chunk_size is None or max_chunk_size >= batch_size:
+        return [(0, batch_size)]
+    if max_chunk_size <= 0:
+        raise ValueError("max_chunk_size must be positive when set.")
+    return _split_batch_ranges(batch_size, math.ceil(batch_size / max_chunk_size))
+
+
+def _assemble_feature_chunks(
+    batch_size: int,
+    chunks: Iterable[tuple[int, int, torch.Tensor, torch.Tensor]],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    iterator = iter(chunks)
+    try:
+        first_start, first_stop, first_target, first_mask = next(iterator)
+    except StopIteration as error:
+        raise ValueError("At least one feature chunk is required.") from error
+
+    targets = first_target.new_empty((batch_size, *first_target.shape[1:]))
+    masks = first_mask.new_empty((batch_size, *first_mask.shape[1:]))
+    targets[first_start:first_stop].copy_(first_target)
+    masks[first_start:first_stop].copy_(first_mask)
+    del first_target, first_mask
+
+    expected_start = first_stop
+    for start, stop, target, mask in iterator:
+        if start != expected_start:
+            raise ValueError(f"Feature chunks must be contiguous; expected start {expected_start}, got {start}.")
+        targets[start:stop].copy_(target)
+        masks[start:stop].copy_(mask)
+        expected_start = stop
+        del target, mask
+    if first_start != 0 or expected_start != batch_size:
+        raise ValueError(f"Feature chunks cover [{first_start}, {expected_start}), expected [0, {batch_size}).")
+    return targets, masks
+
+
 class _TorchAlignFeatureShard:
     def __init__(self, config: Any, *, device_id: int, state_dict: dict[str, torch.Tensor]):
         self.config = config
@@ -78,6 +119,7 @@ class _TorchAlignFeatureShard:
 
         self.model = self._load_model(state_dict).to(self.device)
         self.model.eval()
+        self.stream = torch.cuda.Stream(device=self.device)
 
     def _load_model(self, state_dict: dict[str, torch.Tensor]):
         if self.target_model == "omnivggt":
@@ -102,6 +144,7 @@ class _TorchAlignFeatureShard:
         return model
 
     def close(self) -> None:
+        self.stream.synchronize()
         del self.model
         torch.cuda.empty_cache()
 
@@ -110,23 +153,27 @@ class _TorchAlignFeatureShard:
         start_s = time.perf_counter()
         chunk_size = self.config.align_feature_batch_size
         batch_size = next(iter(observation.images.values())).shape[0]
-        if chunk_size is not None and chunk_size < batch_size:
-            chunks = [
-                self._extract_features(
-                    _slice_observation_batch(observation, start, min(start + chunk_size, batch_size)),
-                    reference_tokens,
+        ranges = _balanced_chunk_ranges(batch_size, chunk_size)
+        with torch.cuda.stream(self.stream):
+            if len(ranges) > 1:
+                chunks = (
+                    (
+                        start,
+                        stop,
+                        *self._extract_features(
+                            _slice_observation_batch(observation, start, stop),
+                            reference_tokens,
+                        ),
+                    )
+                    for start, stop in ranges
                 )
-                for start in range(0, batch_size, chunk_size)
-            ]
-            targets = torch.cat([chunk[0] for chunk in chunks])
-            mask = torch.cat([chunk[1] for chunk in chunks])
-        else:
-            targets, mask = self._extract_features(observation, reference_tokens)
-        torch.cuda.synchronize(self.device)
+                targets, mask = _assemble_feature_chunks(batch_size, chunks)
+            else:
+                targets, mask = self._extract_features(observation, reference_tokens)
         return AlignFeatures(
             targets={self.device.index: targets},
             mask={self.device.index: mask},
-            compute_s=time.perf_counter() - start_s,
+            compute_started_s=start_s,
         )
 
     def _extract_features(
@@ -241,21 +288,28 @@ class _TorchAlignFeatureShard:
         if self.config.ignore_img_padding_area:
             padding = torch.stack(list(img_padding_mask.values()), dim=1)
             target_size = padding.shape[-1] // 14
-            mask_downsampled = F.interpolate(
-                padding.float(),
-                size=(target_size, target_size),
-                mode="nearest",
-            ).bool().flatten(start_dim=1)
+            mask_downsampled = (
+                F.interpolate(
+                    padding.float(),
+                    size=(target_size, target_size),
+                    mode="nearest",
+                ).bool().flatten(start_dim=1)
+            )
             mask = mask & mask_downsampled
         return mask
 
 
 class TorchAlignFeatureExtractor:
     def __init__(self, config: Any, *, devices: list[int]):
+        self.devices = devices
         target_model = infer_target_model(config)
         filename = "OmniVGGT.safetensors" if target_model == "omnivggt" else "model.pt"
         checkpoint_path = os.path.join(config.vggt_weight_path, filename)
-        state_dict = load_file(checkpoint_path) if target_model == "omnivggt" else torch.load(checkpoint_path, map_location="cpu")
+        state_dict = (
+            load_file(checkpoint_path)
+            if target_model == "omnivggt"
+            else torch.load(checkpoint_path, map_location="cpu")
+        )
         self.shards = [
             _TorchAlignFeatureShard(
                 config,
@@ -273,6 +327,16 @@ class TorchAlignFeatureExtractor:
             self.executor.shutdown(wait=True)
         for shard in self.shards:
             shard.close()
+
+    def finalize(self, features: AlignFeatures, *, release_cache: bool) -> None:
+        for shard in self.shards:
+            shard.stream.synchronize()
+        if features.compute_started_s is not None:
+            features.compute_s = time.perf_counter() - features.compute_started_s
+        if release_cache:
+            for device_id in self.devices:
+                with torch.cuda.device(device_id):
+                    torch.cuda.empty_cache()
 
     def __call__(self, observation: _model.Observation, *, reference_tokens: int) -> AlignFeatures:
         if len(self.shards) == 1:
@@ -296,7 +360,7 @@ class TorchAlignFeatureExtractor:
         return AlignFeatures(
             targets={device: value for feature in features for device, value in feature.targets.items()},
             mask={device: value for feature in features for device, value in feature.mask.items()},
-            compute_s=time.perf_counter() - start_s,
+            compute_started_s=start_s,
         )
 
 
@@ -345,18 +409,25 @@ def shard_align_features(
 class AsyncAlignFeatureWorker:
     def __init__(self, extractor: TorchAlignFeatureExtractor):
         self.extractor = extractor
-        # TODO max_workers=1 is a temporary workaround
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        self.futures: collections.deque[concurrent.futures.Future[AlignFeatures]] = collections.deque()
+        self.future: concurrent.futures.Future[AlignFeatures] | None = None
 
     def submit(self, observation: _model.Observation, *, reference_tokens: int) -> None:
-        self.futures.append(self.executor.submit(self.extractor, observation, reference_tokens=reference_tokens))
+        if self.future is not None:
+            raise RuntimeError("An align batch is already pending.")
+        self.future = self.executor.submit(
+            self.extractor,
+            observation,
+            reference_tokens=reference_tokens,
+        )
 
-    def result(self) -> AlignFeatures:
-        return self.futures.popleft().result()
-
-    def pending_count(self) -> int:
-        return len(self.futures)
+    def result(self, *, release_cache: bool = True) -> AlignFeatures:
+        if self.future is None:
+            raise RuntimeError("No align batch is pending.")
+        future, self.future = self.future, None
+        features = future.result()
+        self.extractor.finalize(features, release_cache=release_cache)
+        return features
 
     def close(self) -> None:
         self.executor.shutdown(wait=True)

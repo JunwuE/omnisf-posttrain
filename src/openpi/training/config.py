@@ -1014,7 +1014,6 @@ class TrainConfig:
     align_device_mode: Literal["shared", "reserved"] = "shared"
     align_vggt_devices: int = 1
     align_feature_batch_size: int | None = None
-    align_prefetch_batches: int = 2
 
     # Precision for PyTorch training.
     pytorch_training_precision: Literal["bfloat16", "float32"] = "bfloat16"

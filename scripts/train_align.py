@@ -1,5 +1,3 @@
-import collections
-from collections.abc import Callable
 import dataclasses
 import functools
 import logging
@@ -7,6 +5,10 @@ import os
 import platform
 import time
 from typing import Any
+
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "platform")
+os.environ["WANDB_MODE"] = "offline"
 
 import etils.epath as epath
 import flax.nnx as nnx
@@ -34,9 +36,6 @@ import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as _weight_loaders
 
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-os.environ["WANDB_MODE"] = "offline"
-
 # import debugpy
 # try:
 #     debugpy.listen(("localhost", 9602))
@@ -63,24 +62,6 @@ def init_logging():
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     logger.handlers[0].setFormatter(formatter)
-
-
-def _refill_align_prefetch_queue(
-    *,
-    pending_count: Callable[[], int],
-    submit_next: Callable[[], object],
-    submitted_steps: int,
-    num_train_steps: int,
-    target_pending: int,
-    enabled: bool,
-) -> int:
-    if not enabled:
-        return submitted_steps
-
-    while pending_count() < target_pending and submitted_steps < num_train_steps:
-        submit_next()
-        submitted_steps += 1
-    return submitted_steps
 
 
 def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = False, enabled: bool = True):
@@ -263,6 +244,16 @@ def main(config: _config.TrainConfig):
         pi_devices = [jax.devices()[idx] for idx in device_layout.pi_device_ids]
         vggt_device_ids = device_layout.vggt_device_ids
         logging.info("Using PI GPUs %s and VGGT GPUs %s", device_layout.pi_device_ids, vggt_device_ids)
+    local_pi_device_ids = {
+        device.local_hardware_id for device in pi_devices if device.process_index == dist_info.process_index
+    }
+    shared_device_ids = local_pi_device_ids.intersection(vggt_device_ids)
+    shared_align_devices = bool(shared_device_ids)
+    logging.info(
+        "Align execution: %s (shared GPUs: %s)",
+        "serial" if shared_align_devices else "overlap",
+        sorted(shared_device_ids),
+    )
     if config.batch_size % len(pi_devices) != 0:
         raise ValueError(f"Batch size {config.batch_size} must be divisible by JAX PI device count {len(pi_devices)}.")
 
@@ -292,9 +283,7 @@ def main(config: _config.TrainConfig):
     )
     _distributed.sync_global_devices("data loader initialized")
     data_iter = iter(data_loader)
-    data_load_start = time.perf_counter()
     batch, host_batch = next(data_iter)
-    first_data_load_s = time.perf_counter() - data_load_start
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
     train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
@@ -315,31 +304,17 @@ def main(config: _config.TrainConfig):
     reference_tokens = sum((image.shape[1] // 14) * (image.shape[2] // 14) for image in batch[0].images.values())
     extractor = align_utils.TorchAlignFeatureExtractor(config, devices=vggt_device_ids)
     align_worker = align_utils.AsyncAlignFeatureWorker(extractor)
+    start_step = int(train_state.step)
 
-    pending_batches: collections.deque[tuple[tuple[_model.Observation, _model.Actions], float]] = collections.deque()
-
-    def submit_align_batch(
-        jax_batch: tuple[_model.Observation, _model.Actions],
-        host_batch: tuple[_model.Observation, _model.Actions],
-        *,
-        data_load_s: float,
-    ) -> None:
-        align_worker.submit(host_batch[0], reference_tokens=reference_tokens)
-        pending_batches.append((jax_batch, data_load_s))
-
-    def load_and_submit_next_batch() -> float:
+    def load_and_submit_next_batch():
         load_start = time.perf_counter()
         next_jax_batch, next_host_batch = next(data_iter)
-        data_load_s = time.perf_counter() - load_start
-        submit_align_batch(next_jax_batch, next_host_batch, data_load_s=data_load_s)
-        return data_load_s
+        next_data_load_s = time.perf_counter() - load_start
+        align_worker.submit(next_host_batch[0], reference_tokens=reference_tokens)
+        return next_jax_batch, next_data_load_s
 
-    start_step = int(train_state.step)
-    submitted_steps = start_step
-    # Submit only the current batch so the Torch worker is idle during the first JAX CUDA graph capture.
-    if submitted_steps < config.num_train_steps:
-        submit_align_batch(batch, host_batch, data_load_s=first_data_load_s)
-        submitted_steps += 1
+    if start_step < config.num_train_steps:
+        align_worker.submit(host_batch[0], reference_tokens=reference_tokens)
 
     show_tqdm = _distributed.show_tqdm(is_primary=dist_info.is_primary)
     pbar = tqdm.tqdm(
@@ -360,54 +335,36 @@ def main(config: _config.TrainConfig):
                 logging.info("Starting first align train step; JAX compilation may take several minutes.")
             step_start = time.perf_counter()
 
-            feature_wait_start = time.perf_counter()
-            align_features = align_worker.result()
-            feature_wait_s = time.perf_counter() - feature_wait_start
-            batch, data_load_s = pending_batches.popleft()
-
-            prefetch_submit_start = time.perf_counter()
-            submitted_steps = _refill_align_prefetch_queue(
-                pending_count=align_worker.pending_count,
-                submit_next=load_and_submit_next_batch,
-                submitted_steps=submitted_steps,
-                num_train_steps=config.num_train_steps,
-                target_pending=config.align_prefetch_batches,
-                enabled=not is_initial_train_step,
-            )
-            prefetch_submit_s = time.perf_counter() - prefetch_submit_start
+            align_features = align_worker.result(release_cache=shared_align_devices)
+            next_batch = None
+            data_load_s = 0.0
+            if not shared_align_devices and step + 1 < config.num_train_steps:
+                next_batch, data_load_s = load_and_submit_next_batch()
 
             align_targets, align_mask, align_transport_s = align_utils.shard_align_features(
                 align_features,
                 sharding=data_sharding,
                 global_batch_size=config.batch_size,
             )
-
+            align_compute_s = align_features.compute_s
             train_start = time.perf_counter()
             with sharding.set_mesh(mesh):
                 train_state, info = ptrain_step(train_rng, train_state, batch, align_targets, align_mask)
-            jax.block_until_ready(info)
+                jax.block_until_ready(info)
             train_step_s = time.perf_counter() - train_start
             infos.append(info)
 
-            if is_initial_train_step:
-                prefetch_submit_start = time.perf_counter()
-                submitted_steps = _refill_align_prefetch_queue(
-                    pending_count=align_worker.pending_count,
-                    submit_next=load_and_submit_next_batch,
-                    submitted_steps=submitted_steps,
-                    num_train_steps=config.num_train_steps,
-                    target_pending=config.align_prefetch_batches,
-                    enabled=True,
-                )
-                prefetch_submit_s += time.perf_counter() - prefetch_submit_start
+            del align_targets, align_mask, align_features
+            if shared_align_devices and step + 1 < config.num_train_steps:
+                next_batch, data_load_s = load_and_submit_next_batch()
+            if next_batch is not None:
+                batch = next_batch
 
             step_wall_s = time.perf_counter() - step_start
             timing_info = {
-                "align_wait_s": feature_wait_s,
-                "align_compute_s": align_features.compute_s,
+                "align_compute_s": align_compute_s,
                 "align_transport_s": align_transport_s,
                 "data_load_s": data_load_s,
-                "prefetch_submit_s": prefetch_submit_s,
                 "train_step_s": train_step_s,
                 "step_wall_s": step_wall_s,
                 "samples_per_s": config.batch_size / train_step_s,
@@ -421,7 +378,8 @@ def main(config: _config.TrainConfig):
                 stacked_infos = common_utils.stack_forest(infos)
                 reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
                 if timing_infos:
-                    reduced_info.update({key: float(np.mean([info[key] for info in timing_infos])) for key in timing_infos[0]})
+                    for key in timing_infos[0]:
+                        reduced_info[key] = float(np.mean([info[key] for info in timing_infos]))
                 time_info = _distributed.progress_time_info(
                     loop_start=loop_start,
                     start_step=start_step,
