@@ -140,30 +140,13 @@ def init_train_state(
 
 
 @at.typecheck
-def train_step(
+def _apply_gradients(
     config: _config.TrainConfig,
     lr_schedule_fn: optax.Schedule,
-    rng: at.KeyArrayLike,
     state: training_utils.TrainState,
-    batch: tuple[_model.Observation, _model.Actions],
+    model: _model.BaseModel,
+    grads: at.Params,
 ) -> tuple[training_utils.TrainState, dict[str, at.Array]]:
-    model = nnx.merge(state.model_def, state.params)
-    model.train()
-
-    @at.typecheck
-    def loss_fn(
-        model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
-    ):
-        chunked_loss = model.compute_loss(rng, observation, actions, train=True)
-        return jnp.mean(chunked_loss)
-
-    train_rng = jax.random.fold_in(rng, state.step)
-    observation, actions = batch
-
-    # Filter out frozen params.
-    diff_state = nnx.DiffState(0, config.trainable_filter)
-    loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)
-
     params = state.params.filter(config.trainable_filter)
     learning_rate = lr_schedule_fn(state.step)
     updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
@@ -192,12 +175,77 @@ def train_step(
         ),
     )
     info = {
-        "loss": loss,
         "learning_rate": learning_rate,
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
     }
     return new_state, info
+
+
+def _compute_loss_and_grads(
+    config: _config.TrainConfig,
+    rng: at.KeyArrayLike,
+    state: training_utils.TrainState,
+    model: _model.BaseModel,
+    batch: tuple[_model.Observation, _model.Actions],
+    micro_step: at.Int[at.ArrayLike, ""],
+) -> tuple[at.Array, at.Params]:
+    @at.typecheck
+    def loss_fn(
+        model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
+    ):
+        return jnp.mean(model.compute_loss(rng, observation, actions, train=True))
+
+    step_rng = training_utils.train_rng(rng, state.step, micro_step, config.gradient_accumulation_steps)
+    observation, actions = batch
+    diff_state = nnx.DiffState(0, config.trainable_filter)
+    return nnx.value_and_grad(loss_fn, argnums=diff_state)(model, step_rng, observation, actions)
+
+
+@at.typecheck
+def train_step(
+    config: _config.TrainConfig,
+    lr_schedule_fn: optax.Schedule,
+    rng: at.KeyArrayLike,
+    state: training_utils.TrainState,
+    batch: tuple[_model.Observation, _model.Actions],
+) -> tuple[training_utils.TrainState, dict[str, at.Array]]:
+    model = nnx.merge(state.model_def, state.params)
+    model.train()
+    loss, grads = _compute_loss_and_grads(config, rng, state, model, batch, jnp.array(0))
+    new_state, update_info = _apply_gradients(config, lr_schedule_fn, state, model, grads)
+    return new_state, {"loss": loss, **update_info}
+
+
+@at.typecheck
+def accumulate_train_step(
+    config: _config.TrainConfig,
+    rng: at.KeyArrayLike,
+    state: training_utils.TrainState,
+    gradient_accumulator: at.Params,
+    batch: tuple[_model.Observation, _model.Actions],
+    micro_step: at.Int[at.ArrayLike, ""],
+) -> tuple[at.Params, dict[str, at.Array]]:
+    model = nnx.merge(state.model_def, state.params)
+    model.train()
+    loss, grads = _compute_loss_and_grads(config, rng, state, model, batch, micro_step)
+    gradient_accumulator = training_utils.accumulate_gradients(
+        gradient_accumulator, grads, config.gradient_accumulation_steps
+    )
+    return gradient_accumulator, {"loss": loss}
+
+
+@at.typecheck
+def apply_accumulated_gradients(
+    config: _config.TrainConfig,
+    lr_schedule_fn: optax.Schedule,
+    state: training_utils.TrainState,
+    gradient_accumulator: at.Params,
+) -> tuple[training_utils.TrainState, at.Params, dict[str, at.Array]]:
+    model = nnx.merge(state.model_def, state.params)
+    model.train()
+    new_state, info = _apply_gradients(config, lr_schedule_fn, state, model, gradient_accumulator)
+    return new_state, training_utils.init_gradient_accumulator(gradient_accumulator), info
 
 
 def main(config: _config.TrainConfig):
@@ -214,13 +262,20 @@ def main(config: _config.TrainConfig):
         raise ValueError(
             f"Batch size {config.batch_size} must be divisible by the number of devices {jax.device_count()}."
         )
+    accumulation_steps = config.gradient_accumulation_steps
+    logging.info(
+        "Gradient accumulation: micro_batch_size=%s, accumulation_steps=%s, effective_batch_size=%s",
+        config.batch_size,
+        accumulation_steps,
+        config.effective_batch_size,
+    )
 
     jax.config.update("jax_compilation_cache_dir", str(epath.Path("~/.cache/jax").expanduser()))
 
     rng = jax.random.key(config.seed)
     train_rng, init_rng = jax.random.split(rng)
 
-    mesh = sharding.make_mesh(config.fsdp_devices)
+    mesh = sharding.make_mesh(config.fsdp_devices, num_nodes=dist_info.node_count)
     data_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(sharding.DATA_AXIS))
     replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
@@ -259,12 +314,38 @@ def main(config: _config.TrainConfig):
         train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
 
     lr_schedule_fn = config.lr_schedule.create()
-    ptrain_step = jax.jit(
-        functools.partial(train_step, config, lr_schedule_fn),
-        in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
-        out_shardings=(train_state_sharding, replicated_sharding),
-        donate_argnums=(1,),
-    )
+    if accumulation_steps == 1:
+        ptrain_step = jax.jit(
+            functools.partial(train_step, config, lr_schedule_fn),
+            in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
+            out_shardings=(train_state_sharding, replicated_sharding),
+            donate_argnums=(1,),
+        )
+    else:
+        gradient_sharding = train_state_sharding.params.filter(config.trainable_filter)
+        gradient_accumulator = jax.jit(
+            training_utils.init_gradient_accumulator,
+            in_shardings=(gradient_sharding,),
+            out_shardings=gradient_sharding,
+        )(train_state.params.filter(config.trainable_filter))
+        paccumulate_train_step = jax.jit(
+            functools.partial(accumulate_train_step, config),
+            in_shardings=(
+                replicated_sharding,
+                train_state_sharding,
+                gradient_sharding,
+                data_sharding,
+                replicated_sharding,
+            ),
+            out_shardings=(gradient_sharding, replicated_sharding),
+            donate_argnums=(2,),
+        )
+        papply_accumulated_gradients = jax.jit(
+            functools.partial(apply_accumulated_gradients, config, lr_schedule_fn),
+            in_shardings=(train_state_sharding, gradient_sharding),
+            out_shardings=(train_state_sharding, gradient_sharding, replicated_sharding),
+            donate_argnums=(0, 1),
+        )
 
     start_step = int(train_state.step)
     show_tqdm = _distributed.show_tqdm(is_primary=dist_info.is_primary)
@@ -282,26 +363,59 @@ def main(config: _config.TrainConfig):
     for step in pbar:
         if dist_info.is_primary and step == start_step:
             logging.info("Starting first train step; JAX compilation may take several minutes.")
-        train_start = time.perf_counter()
-        with sharding.set_mesh(mesh):
-            train_state, info = ptrain_step(train_rng, train_state, batch)
-        jax.block_until_ready(info)
-        train_step_s = time.perf_counter() - train_start
+        train_step_s = 0.0
+        data_wait_s = 0.0
+        micro_infos = []
+        for micro_step in range(accumulation_steps):
+            train_start = time.perf_counter()
+            with sharding.set_mesh(mesh):
+                if accumulation_steps == 1:
+                    train_state, info = ptrain_step(train_rng, train_state, batch)
+                else:
+                    gradient_accumulator, micro_info = paccumulate_train_step(
+                        train_rng,
+                        train_state,
+                        gradient_accumulator,
+                        batch,
+                        jnp.array(micro_step, dtype=jnp.int32),
+                    )
+                    jax.block_until_ready(micro_info)
+                    micro_infos.append(micro_info)
+            if accumulation_steps == 1:
+                jax.block_until_ready(info)
+            train_step_s += time.perf_counter() - train_start
+
+            has_next_batch = step + 1 < config.num_train_steps or micro_step + 1 < accumulation_steps
+            if has_next_batch:
+                data_wait_start = time.perf_counter()
+                batch = next(data_iter)
+                data_wait_s += time.perf_counter() - data_wait_start
+
+        if accumulation_steps > 1:
+            apply_start = time.perf_counter()
+            with sharding.set_mesh(mesh):
+                train_state, gradient_accumulator, update_info = papply_accumulated_gradients(
+                    train_state, gradient_accumulator
+                )
+                jax.block_until_ready(update_info)
+            train_step_s += time.perf_counter() - apply_start
+            info = jax.tree.map(jnp.mean, common_utils.stack_forest(micro_infos))
+            info.update(update_info)
+
         infos.append(info)
         timing_info = {
             "train_step_s": train_step_s,
-            "samples_per_s": config.batch_size / train_step_s,
+            "data_wait_s": data_wait_s,
+            "samples_per_s": config.effective_batch_size / train_step_s,
             "steps_per_h": 3600.0 / train_step_s,
         }
+        timing_infos.append(timing_info)
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
             if timing_infos:
                 reduced_info.update(
-                    {
-                        key: float(np.mean([info[key] for info in timing_infos]))
-                        for key in timing_infos[0]
-                    }
+                    {key: float(np.mean([info[key] for info in timing_infos])) for key in timing_infos[0]}
                 )
             time_info = _distributed.progress_time_info(
                 loop_start=loop_start,
@@ -317,10 +431,6 @@ def main(config: _config.TrainConfig):
                 wandb.log(reduced_info, step=step)
             infos = []
             timing_infos = []
-        data_wait_start = time.perf_counter()
-        batch = next(data_iter)
-        timing_info["data_wait_s"] = time.perf_counter() - data_wait_start
-        timing_infos.append(timing_info)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
             _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)

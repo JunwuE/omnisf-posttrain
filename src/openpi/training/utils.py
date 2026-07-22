@@ -36,3 +36,24 @@ def tree_to_info(tree: at.PyTree, interp_func: Callable[[Any], str] = str) -> st
 def array_tree_to_info(tree: at.PyTree) -> str:
     """Converts a PyTree of arrays into a human-readable string for logging."""
     return tree_to_info(tree, lambda x: f"{x.shape}@{x.dtype}")
+
+
+def init_gradient_accumulator(params: at.PyTree) -> at.PyTree:
+    """Creates a zero-filled gradient accumulator matching a trainable parameter tree."""
+    return jax.tree.map(jax.numpy.zeros_like, params)
+
+
+def accumulate_gradients(accumulator: at.PyTree, grads: at.PyTree, accumulation_steps: int) -> at.PyTree:
+    """Adds one micro-batch gradient to an accumulator as part of a gradient mean."""
+    scale = 1.0 / accumulation_steps
+    return jax.tree.map(lambda accumulated, grad: accumulated + grad * scale, accumulator, grads)
+
+
+def train_rng(
+    rng: at.KeyArrayLike,
+    optimizer_step: at.Int[at.ArrayLike, ""],
+    micro_step: at.Int[at.ArrayLike, ""],
+    accumulation_steps: int,
+) -> at.KeyArrayLike:
+    """Derives a deterministic, distinct RNG for every micro-batch."""
+    return jax.random.fold_in(rng, optimizer_step * accumulation_steps + micro_step)

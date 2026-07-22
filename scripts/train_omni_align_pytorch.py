@@ -662,6 +662,11 @@ def train_loop(config: _config.TrainConfig):
 def main():
     init_logging()
     config = _config.cli()
+    if config.gradient_accumulation_steps != 1:
+        raise ValueError(
+            "gradient_accumulation_steps is only supported by the JAX training entrypoints; "
+            "set it to 1 for scripts/train_omni_align_pytorch.py."
+        )
     train_loop(config)
 
 

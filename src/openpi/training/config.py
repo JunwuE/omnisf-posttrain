@@ -1037,10 +1037,12 @@ class TrainConfig:
     seed: int = 42
     # Global batch size.
     batch_size: int = 32
+    # Number of micro-batches whose gradients are averaged before each optimizer update.
+    gradient_accumulation_steps: int = 1
     # Number of workers to use for the data loader. Increasing this number will speed up data loading but
     # will increase memory and CPU usage.
     num_workers: int = 2
-    # Number of train steps (batches) to run.
+    # Number of optimizer update steps to run.
     num_train_steps: int = 30_000
 
     # How often (in steps) to log training metrics.
@@ -1080,6 +1082,11 @@ class TrainConfig:
         return (pathlib.Path(self.checkpoint_base_dir) / self.name / self.exp_name).resolve()
 
     @property
+    def effective_batch_size(self) -> int:
+        """Global batch size represented by one optimizer update."""
+        return self.batch_size * self.gradient_accumulation_steps
+
+    @property
     def trainable_filter(self) -> nnx.filterlib.Filter:
         """Get the filter for the trainable parameters."""
         return nnx.All(nnx.Param, nnx.Not(self.freeze_filter))
@@ -1087,6 +1094,8 @@ class TrainConfig:
     def __post_init__(self) -> None:
         if self.resume and self.overwrite:
             raise ValueError("Cannot resume and overwrite at the same time.")
+        if self.gradient_accumulation_steps < 1:
+            raise ValueError("gradient_accumulation_steps must be at least 1.")
 
 
 # Use `get_config` if you need to get a config by name in your code.
@@ -1880,7 +1889,7 @@ def load_external_configs(directory_path: str) -> list[TrainConfig]:
 
     return external_configs
 
-EXTERNAL_CONFIG_DIR = "/root/nas/lfh/omnisf/src/openpi/external_config"
+EXTERNAL_CONFIG_DIR = "src/openpi/external_config"
 _CONFIGS.extend(load_external_configs(EXTERNAL_CONFIG_DIR))
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):

@@ -149,40 +149,13 @@ def init_train_state(
 
 
 @at.typecheck
-def train_step(
+def _apply_gradients(
     config: _config.TrainConfig,
     lr_schedule_fn: optax.Schedule,
-    rng: at.KeyArrayLike,
     state: training_utils.TrainState,
-    batch: tuple[_model.Observation, _model.Actions],
-    align_targets: at.Float[at.Array, "b s d"],
-    align_mask: at.Bool[at.Array, "b s"],
+    model: _model.BaseModel,
+    grads: at.Params,
 ) -> tuple[training_utils.TrainState, dict[str, at.Array]]:
-    model = nnx.merge(state.model_def, state.params)
-    model.train()
-
-    @at.typecheck
-    def loss_fn(
-        model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
-    ):
-        loss, action_loss, align_loss = model.compute_align_losses(
-            rng,
-            observation,
-            actions,
-            align_targets,
-            align_mask,
-            train=True,
-        )
-        return loss, (action_loss, align_loss)
-
-    train_rng = jax.random.fold_in(rng, state.step)
-    observation, actions = batch
-
-    diff_state = nnx.DiffState(0, config.trainable_filter)
-    (loss, (action_loss, align_loss)), grads = nnx.value_and_grad(loss_fn, argnums=diff_state, has_aux=True)(
-        model, train_rng, observation, actions
-    )
-
     params = state.params.filter(config.trainable_filter)
     learning_rate = lr_schedule_fn(state.step)
     updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
@@ -211,14 +184,98 @@ def train_step(
         ),
     )
     info = {
-        "loss": loss,
-        "action_loss": action_loss,
-        "align_loss": align_loss,
         "learning_rate": learning_rate,
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
     }
     return new_state, info
+
+
+def _compute_loss_and_grads(
+    config: _config.TrainConfig,
+    rng: at.KeyArrayLike,
+    state: training_utils.TrainState,
+    model: _model.BaseModel,
+    batch: tuple[_model.Observation, _model.Actions],
+    align_targets: at.Float[at.Array, "b s d"],
+    align_mask: at.Bool[at.Array, "b s"],
+    micro_step: at.Int[at.ArrayLike, ""],
+) -> tuple[tuple[at.Array, at.Array, at.Array], at.Params]:
+    @at.typecheck
+    def loss_fn(
+        model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
+    ):
+        loss, action_loss, align_loss = model.compute_align_losses(
+            rng,
+            observation,
+            actions,
+            align_targets,
+            align_mask,
+            train=True,
+        )
+        return loss, (action_loss, align_loss)
+
+    step_rng = training_utils.train_rng(rng, state.step, micro_step, config.gradient_accumulation_steps)
+    observation, actions = batch
+    diff_state = nnx.DiffState(0, config.trainable_filter)
+    (loss, (action_loss, align_loss)), grads = nnx.value_and_grad(loss_fn, argnums=diff_state, has_aux=True)(
+        model, step_rng, observation, actions
+    )
+    return (loss, action_loss, align_loss), grads
+
+
+@at.typecheck
+def train_step(
+    config: _config.TrainConfig,
+    lr_schedule_fn: optax.Schedule,
+    rng: at.KeyArrayLike,
+    state: training_utils.TrainState,
+    batch: tuple[_model.Observation, _model.Actions],
+    align_targets: at.Float[at.Array, "b s d"],
+    align_mask: at.Bool[at.Array, "b s"],
+) -> tuple[training_utils.TrainState, dict[str, at.Array]]:
+    model = nnx.merge(state.model_def, state.params)
+    model.train()
+    (loss, action_loss, align_loss), grads = _compute_loss_and_grads(
+        config, rng, state, model, batch, align_targets, align_mask, jnp.array(0)
+    )
+    new_state, update_info = _apply_gradients(config, lr_schedule_fn, state, model, grads)
+    return new_state, {"loss": loss, "action_loss": action_loss, "align_loss": align_loss, **update_info}
+
+
+@at.typecheck
+def accumulate_train_step(
+    config: _config.TrainConfig,
+    rng: at.KeyArrayLike,
+    state: training_utils.TrainState,
+    gradient_accumulator: at.Params,
+    batch: tuple[_model.Observation, _model.Actions],
+    align_targets: at.Float[at.Array, "b s d"],
+    align_mask: at.Bool[at.Array, "b s"],
+    micro_step: at.Int[at.ArrayLike, ""],
+) -> tuple[at.Params, dict[str, at.Array]]:
+    model = nnx.merge(state.model_def, state.params)
+    model.train()
+    (loss, action_loss, align_loss), grads = _compute_loss_and_grads(
+        config, rng, state, model, batch, align_targets, align_mask, micro_step
+    )
+    gradient_accumulator = training_utils.accumulate_gradients(
+        gradient_accumulator, grads, config.gradient_accumulation_steps
+    )
+    return gradient_accumulator, {"loss": loss, "action_loss": action_loss, "align_loss": align_loss}
+
+
+@at.typecheck
+def apply_accumulated_gradients(
+    config: _config.TrainConfig,
+    lr_schedule_fn: optax.Schedule,
+    state: training_utils.TrainState,
+    gradient_accumulator: at.Params,
+) -> tuple[training_utils.TrainState, at.Params, dict[str, at.Array]]:
+    model = nnx.merge(state.model_def, state.params)
+    model.train()
+    new_state, info = _apply_gradients(config, lr_schedule_fn, state, model, gradient_accumulator)
+    return new_state, training_utils.init_gradient_accumulator(gradient_accumulator), info
 
 
 def main(config: _config.TrainConfig):
@@ -256,13 +313,20 @@ def main(config: _config.TrainConfig):
     )
     if config.batch_size % len(pi_devices) != 0:
         raise ValueError(f"Batch size {config.batch_size} must be divisible by JAX PI device count {len(pi_devices)}.")
+    accumulation_steps = config.gradient_accumulation_steps
+    logging.info(
+        "Gradient accumulation: micro_batch_size=%s, accumulation_steps=%s, effective_batch_size=%s",
+        config.batch_size,
+        accumulation_steps,
+        config.effective_batch_size,
+    )
 
     jax.config.update("jax_compilation_cache_dir", str(epath.Path("~/.cache/jax").expanduser()))
 
     rng = jax.random.key(config.seed)
     train_rng, init_rng = jax.random.split(rng)
 
-    mesh = sharding.make_mesh(config.fsdp_devices, devices=pi_devices)
+    mesh = sharding.make_mesh(config.fsdp_devices, devices=pi_devices, num_nodes=dist_info.node_count)
     data_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(sharding.DATA_AXIS))
     replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
@@ -294,12 +358,40 @@ def main(config: _config.TrainConfig):
         train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
 
     lr_schedule_fn = config.lr_schedule.create()
-    ptrain_step = jax.jit(
-        functools.partial(train_step, config, lr_schedule_fn),
-        in_shardings=(replicated_sharding, train_state_sharding, data_sharding, data_sharding, data_sharding),
-        out_shardings=(train_state_sharding, replicated_sharding),
-        donate_argnums=(1,),
-    )
+    if accumulation_steps == 1:
+        ptrain_step = jax.jit(
+            functools.partial(train_step, config, lr_schedule_fn),
+            in_shardings=(replicated_sharding, train_state_sharding, data_sharding, data_sharding, data_sharding),
+            out_shardings=(train_state_sharding, replicated_sharding),
+            donate_argnums=(1,),
+        )
+    else:
+        gradient_sharding = train_state_sharding.params.filter(config.trainable_filter)
+        gradient_accumulator = jax.jit(
+            training_utils.init_gradient_accumulator,
+            in_shardings=(gradient_sharding,),
+            out_shardings=gradient_sharding,
+        )(train_state.params.filter(config.trainable_filter))
+        paccumulate_train_step = jax.jit(
+            functools.partial(accumulate_train_step, config),
+            in_shardings=(
+                replicated_sharding,
+                train_state_sharding,
+                gradient_sharding,
+                data_sharding,
+                data_sharding,
+                data_sharding,
+                replicated_sharding,
+            ),
+            out_shardings=(gradient_sharding, replicated_sharding),
+            donate_argnums=(2,),
+        )
+        papply_accumulated_gradients = jax.jit(
+            functools.partial(apply_accumulated_gradients, config, lr_schedule_fn),
+            in_shardings=(train_state_sharding, gradient_sharding),
+            out_shardings=(train_state_sharding, gradient_sharding, replicated_sharding),
+            donate_argnums=(0, 1),
+        )
 
     reference_tokens = sum((image.shape[1] // 14) * (image.shape[2] // 14) for image in batch[0].images.values())
     extractor = align_utils.TorchAlignFeatureExtractor(config, devices=vggt_device_ids)
@@ -334,31 +426,74 @@ def main(config: _config.TrainConfig):
             if dist_info.is_primary and is_initial_train_step:
                 logging.info("Starting first align train step; JAX compilation may take several minutes.")
             step_start = time.perf_counter()
-
-            align_features = align_worker.result(release_cache=shared_align_devices)
-            next_batch = None
+            align_compute_s = 0.0
+            align_transport_s = 0.0
             data_load_s = 0.0
-            if not shared_align_devices and step + 1 < config.num_train_steps:
-                next_batch, data_load_s = load_and_submit_next_batch()
+            train_step_s = 0.0
+            micro_infos = []
+            submit_after_update = False
 
-            align_targets, align_mask, align_transport_s = align_utils.shard_align_features(
-                align_features,
-                sharding=data_sharding,
-                global_batch_size=config.batch_size,
-            )
-            align_compute_s = align_features.compute_s
-            train_start = time.perf_counter()
-            with sharding.set_mesh(mesh):
-                train_state, info = ptrain_step(train_rng, train_state, batch, align_targets, align_mask)
-                jax.block_until_ready(info)
-            train_step_s = time.perf_counter() - train_start
+            for micro_step in range(accumulation_steps):
+                has_next_batch = step + 1 < config.num_train_steps or micro_step + 1 < accumulation_steps
+                align_features = align_worker.result(release_cache=shared_align_devices)
+                next_batch = None
+                if not shared_align_devices and has_next_batch:
+                    next_batch, next_data_load_s = load_and_submit_next_batch()
+                    data_load_s += next_data_load_s
+
+                align_targets, align_mask, micro_transport_s = align_utils.shard_align_features(
+                    align_features,
+                    sharding=data_sharding,
+                    global_batch_size=config.batch_size,
+                )
+                align_compute_s += align_features.compute_s
+                align_transport_s += micro_transport_s
+                train_start = time.perf_counter()
+                with sharding.set_mesh(mesh):
+                    if accumulation_steps == 1:
+                        train_state, info = ptrain_step(train_rng, train_state, batch, align_targets, align_mask)
+                        jax.block_until_ready(info)
+                    else:
+                        gradient_accumulator, micro_info = paccumulate_train_step(
+                            train_rng,
+                            train_state,
+                            gradient_accumulator,
+                            batch,
+                            align_targets,
+                            align_mask,
+                            jnp.array(micro_step, dtype=jnp.int32),
+                        )
+                        jax.block_until_ready(micro_info)
+                        micro_infos.append(micro_info)
+                train_step_s += time.perf_counter() - train_start
+
+                del align_targets, align_mask, align_features
+                is_last_accumulation_micro_step = micro_step + 1 == accumulation_steps
+                if shared_align_devices and has_next_batch:
+                    if accumulation_steps > 1 and is_last_accumulation_micro_step:
+                        submit_after_update = True
+                    else:
+                        next_batch, next_data_load_s = load_and_submit_next_batch()
+                        data_load_s += next_data_load_s
+                if next_batch is not None:
+                    batch = next_batch
+
+            if accumulation_steps > 1:
+                apply_start = time.perf_counter()
+                with sharding.set_mesh(mesh):
+                    train_state, gradient_accumulator, update_info = papply_accumulated_gradients(
+                        train_state, gradient_accumulator
+                    )
+                    jax.block_until_ready(update_info)
+                train_step_s += time.perf_counter() - apply_start
+                info = jax.tree.map(jnp.mean, common_utils.stack_forest(micro_infos))
+                info.update(update_info)
+
+                if submit_after_update:
+                    batch, next_data_load_s = load_and_submit_next_batch()
+                    data_load_s += next_data_load_s
+
             infos.append(info)
-
-            del align_targets, align_mask, align_features
-            if shared_align_devices and step + 1 < config.num_train_steps:
-                next_batch, data_load_s = load_and_submit_next_batch()
-            if next_batch is not None:
-                batch = next_batch
 
             step_wall_s = time.perf_counter() - step_start
             timing_info = {
@@ -367,8 +502,8 @@ def main(config: _config.TrainConfig):
                 "data_load_s": data_load_s,
                 "train_step_s": train_step_s,
                 "step_wall_s": step_wall_s,
-                "samples_per_s": config.batch_size / train_step_s,
-                "step_samples_per_s": config.batch_size / step_wall_s,
+                "samples_per_s": config.effective_batch_size / train_step_s,
+                "step_samples_per_s": config.effective_batch_size / step_wall_s,
                 "steps_per_h": 3600.0 / train_step_s,
                 "wall_steps_per_h": 3600.0 / step_wall_s,
             }

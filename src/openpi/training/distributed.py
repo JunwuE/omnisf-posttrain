@@ -14,6 +14,7 @@ class DistributedInfo:
     process_count: int
     process_index: int
     local_process_index: int
+    node_count: int
     coordinator_address: str | None
     local_device_ids: tuple[int, ...]
 
@@ -45,6 +46,7 @@ def _distributed_info_from_env() -> DistributedInfo:
     process_count = _env_int("JAX_PROCESS_COUNT", _env_int("SLURM_NTASKS", 1))
     process_index = _env_int("JAX_PROCESS_INDEX", _env_int("SLURM_PROCID", 0))
     local_process_index = _env_int("JAX_LOCAL_PROCESS_INDEX", _env_int("SLURM_LOCALID", 0))
+    node_count = _env_int("SLURM_JOB_NUM_NODES", 1)
     master_addr = os.environ.get("JAX_COORDINATOR_ADDR", os.environ.get("MASTER_ADDR"))
     master_port = os.environ.get("JAX_COORDINATOR_PORT", os.environ.get("MASTER_PORT"))
     coordinator_address = f"{master_addr}:{master_port}" if master_addr and master_port else None
@@ -54,6 +56,7 @@ def _distributed_info_from_env() -> DistributedInfo:
         process_count=process_count,
         process_index=process_index,
         local_process_index=local_process_index,
+        node_count=node_count,
         coordinator_address=coordinator_address,
         local_device_ids=tuple(map(int, local_device_ids.split(",")))
         if local_device_ids
@@ -85,14 +88,16 @@ def initialize() -> DistributedInfo:
         process_count=jax.process_count(),
         process_index=jax.process_index(),
         local_process_index=env_info.local_process_index,
+        node_count=env_info.node_count,
         coordinator_address=env_info.coordinator_address,
         local_device_ids=tuple(device.local_hardware_id for device in jax.local_devices()),
     )
     logging.info(
-        "JAX distributed: process=%s/%s local_process=%s local_devices=%s global_devices=%s coordinator=%s",
+        "JAX distributed: process=%s/%s local_process=%s nodes=%s local_devices=%s global_devices=%s coordinator=%s",
         info.process_index,
         info.process_count,
         info.local_process_index,
+        info.node_count,
         jax.local_device_count(),
         jax.device_count(),
         info.coordinator_address,

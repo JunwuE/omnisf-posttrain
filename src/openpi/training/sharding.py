@@ -24,22 +24,33 @@ class _MeshState:
     active_mesh: jax.sharding.Mesh | None = None
 
 
-def _device_rows(devices: list[jax.Device], num_fsdp_devices: int) -> list[list[jax.Device]]:
-    devices.sort(key=lambda device: (device.process_index, device.local_hardware_id))
-    rows = [devices[start : start + num_fsdp_devices] for start in range(0, len(devices), num_fsdp_devices)]
-    if any(row[0].process_index != row[-1].process_index for row in rows):
-        raise ValueError("FSDP groups must stay within one node")
+def _device_rows(devices: list[jax.Device], num_fsdp_devices: int, num_nodes: int) -> list[list[jax.Device]]:
+    devices_per_node = len(devices) // num_nodes
+    # The launcher assigns contiguous process indices to each node. Sorting also keeps devices local to a multi-GPU
+    # process adjacent, so this supports both one-process-per-GPU and one-process-per-node launch layouts.
+    ordered_devices = sorted(devices, key=lambda device: (device.process_index, device.local_hardware_id))
+    rows = []
+    for node_start in range(0, len(ordered_devices), devices_per_node):
+        node_devices = ordered_devices[node_start : node_start + devices_per_node]
+        rows.extend(
+            node_devices[start : start + num_fsdp_devices] for start in range(0, devices_per_node, num_fsdp_devices)
+        )
     return rows
 
 
-def make_mesh(num_fsdp_devices: int, devices: list[jax.Device] | None = None) -> jax.sharding.Mesh:
+def make_mesh(
+    num_fsdp_devices: int,
+    devices: list[jax.Device] | None = None,
+    *,
+    num_nodes: int = 1,
+) -> jax.sharding.Mesh:
     devices = list(jax.devices() if devices is None else devices)
     if len(devices) % num_fsdp_devices != 0:
         raise ValueError(
             f"Number of devices {len(devices)} must be divisible by the number of FSDP devices {num_fsdp_devices}."
         )
     return jax.sharding.Mesh(
-        np.asarray(_device_rows(devices, num_fsdp_devices), dtype=object),
+        np.asarray(_device_rows(devices, num_fsdp_devices, num_nodes), dtype=object),
         (BATCH_AXIS, FSDP_AXIS),
     )
 
