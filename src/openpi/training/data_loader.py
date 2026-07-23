@@ -2,8 +2,10 @@ from collections.abc import Iterator, Sequence
 import logging
 import multiprocessing
 import os
+import pathlib
 import queue
 import threading
+import time
 import typing
 from typing import Literal, Protocol, SupportsIndex, TypeVar
 
@@ -15,6 +17,7 @@ import torch
 
 import openpi.models.model as _model
 import openpi.training.config as _config
+import openpi.training.distributed as _distributed
 from openpi.training.droid_rlds_dataset import DroidRldsDataset
 import openpi.transforms as _transforms
 
@@ -129,6 +132,42 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
+class _FastLocalLeRobotDataset(lerobot_dataset.LeRobotDataset):
+    """Read an immutable local LeRobot dataset without unused training-time validation."""
+
+    def __init__(self, repo_id: str, info: dict, *, delta_timestamps: dict[str, list[float]]):
+        torch.utils.data.Dataset.__init__(self)
+        root = pathlib.Path(repo_id).expanduser().resolve()
+        self.repo_id = str(root)
+        self.root = root
+        self.image_transforms = None
+        self.delta_timestamps = delta_timestamps
+        self.episodes = None
+        self.tolerance_s = 1e-4
+        self.revision = lerobot_dataset.CODEBASE_VERSION
+        self.video_backend = lerobot_dataset.get_safe_default_codec()
+        self.delta_indices = None
+        self.image_writer = None
+        self.episode_buffer = None
+
+        # Training uses external normalization stats, so per-episode stats need not be parsed here.
+        meta = lerobot_dataset.LeRobotDatasetMetadata.__new__(lerobot_dataset.LeRobotDatasetMetadata)
+        meta.repo_id = self.repo_id
+        meta.revision = self.revision
+        meta.root = root
+        meta.info = info
+        meta.tasks, meta.task_to_task_index = lerobot_dataset.load_tasks(root)
+        meta.episodes = lerobot_dataset.load_episodes(root)
+        meta.stats = {}
+        meta.episodes_stats = {}
+        self.meta = meta
+
+        self.hf_dataset = self.load_hf_dataset()
+        self.episode_data_index = lerobot_dataset.get_episode_data_index(self.meta.episodes, self.episodes)
+        lerobot_dataset.check_delta_timestamps(self.delta_timestamps, self.fps, self.tolerance_s)
+        self.delta_indices = lerobot_dataset.get_delta_indices(self.delta_timestamps, self.fps)
+
+
 class WeightedMixedDataset(Dataset):
     """
     Mixes multiple datasets with configurable source weights.
@@ -224,8 +263,16 @@ class _PrefetchIterator:
             self._thread.join(timeout=1.0)
 
 
+def _action_delta_timestamps(data_config: _config.DataConfig, action_horizon: int, fps: int) -> dict[str, list[float]]:
+    return {key: [t / fps for t in range(action_horizon)] for key in data_config.action_sequence_keys}
+
+
 def create_torch_dataset(
-    data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
+    data_config: _config.DataConfig,
+    action_horizon: int,
+    model_config: _model.BaseModelConfig,
+    *,
+    fast_local_loading: bool = False,
 ) -> Dataset:
     """Create a dataset for training."""
     repo_id = data_config.repo_id
@@ -234,16 +281,23 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
-    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
-    dataset = lerobot_dataset.LeRobotDataset(
-        data_config.repo_id,
-        delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
-        },
-    )
+    if fast_local_loading:
+        root = pathlib.Path(repo_id).expanduser().resolve()
+        info = lerobot_dataset.load_info(root)
+        dataset = _FastLocalLeRobotDataset(
+            str(root),
+            info,
+            delta_timestamps=_action_delta_timestamps(data_config, action_horizon, info["fps"]),
+        )
+    else:
+        dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+        dataset = lerobot_dataset.LeRobotDataset(
+            repo_id,
+            delta_timestamps=_action_delta_timestamps(data_config, action_horizon, dataset_meta.fps),
+        )
 
     if data_config.prompt_from_task:
-        dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+        dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset.meta.tasks)])
 
     return dataset
 
@@ -301,8 +355,17 @@ def create_transformed_single_torch_dataset(
     *,
     skip_norm_stats: bool = False,
     tail_transforms: Sequence[_transforms.DataTransformFn] = (),
+    fast_local_loading: bool = False,
+    torch_dataset: Dataset | None = None,
 ) -> Dataset:
-    dataset = create_torch_dataset(data_config, action_horizon, model_config)
+    dataset = torch_dataset
+    if dataset is None:
+        dataset = create_torch_dataset(
+            data_config,
+            action_horizon,
+            model_config,
+            fast_local_loading=fast_local_loading,
+        )
     return transform_dataset(
         dataset,
         data_config,
@@ -320,16 +383,57 @@ def create_transformed_mixed_torch_dataset(
     skip_norm_stats: bool = False,
     tail_transforms: Sequence[_transforms.DataTransformFn] = (),
 ) -> Dataset:
+    torch_datasets: list[Dataset | None] = [None] * len(data_config.components)
+    if data_config.fast_local_loading:
+        process_count = jax.process_count()
+        process_index = jax.process_index()
+        assigned_indices = range(process_index, len(data_config.components), process_count)
+        warmup_start = time.perf_counter()
+        logging.info(
+            "Fast local cache warmup: process=%s/%s assigned_components=%s total_components=%s",
+            process_index,
+            process_count,
+            len(assigned_indices),
+            len(data_config.components),
+        )
+        for index in assigned_indices:
+            component = data_config.components[index]
+            torch_datasets[index] = create_torch_dataset(
+                component,
+                action_horizon,
+                model_config,
+                fast_local_loading=True,
+            )
+        logging.info(
+            "Fast local cache warmup complete: process=%s elapsed_s=%.1f",
+            process_index,
+            time.perf_counter() - warmup_start,
+        )
+        _distributed.sync_global_devices("fast local dataset cache warmup")
+
+    materialize_start = time.perf_counter()
+    mixed_tail_transforms = (
+        (_transforms.PadCameraParams(), *tail_transforms) if data_config.pad_camera_params else tail_transforms
+    )
     aligned_datasets = [
         create_transformed_single_torch_dataset(
             component,
             action_horizon,
             model_config,
             skip_norm_stats=skip_norm_stats,
-            tail_transforms=(_transforms.PadCameraParams(), *tail_transforms) if data_config.pad_camera_params else tail_transforms,
+            tail_transforms=mixed_tail_transforms,
+            fast_local_loading=data_config.fast_local_loading,
+            torch_dataset=torch_datasets[index],
         )
-        for component in data_config.components
+        for index, component in enumerate(data_config.components)
     ]
+    logging.info(
+        "Mixed dataset materialized: components=%s total_frames=%s fast_local_loading=%s elapsed_s=%.1f",
+        len(aligned_datasets),
+        sum(len(dataset) for dataset in aligned_datasets),
+        data_config.fast_local_loading,
+        time.perf_counter() - materialize_start,
+    )
     return WeightedMixedDataset(aligned_datasets, data_config.weights, seed=seed)
 
 
@@ -384,7 +488,15 @@ def create_data_loader(
         return_host_batch: If true, each item also includes the transformed host batch before JAX sharding.
     """
     data_config = config.data.create(config.assets_dirs, config.model)
-    logging.info(f"data_config: {data_config}")
+    if isinstance(data_config, _config.MixedDataConfig):
+        logging.info(
+            "data_config: MixedDataConfig(components=%s, fast_local_loading=%s, asset_id=%s)",
+            len(data_config.components),
+            data_config.fast_local_loading,
+            data_config.asset_id,
+        )
+    else:
+        logging.info("data_config: %s", data_config)
 
     if data_config.rlds_data_dir is not None:
         return create_rlds_data_loader(
@@ -682,6 +794,7 @@ def _worker_init_fn(worker_id: int) -> None:
     # means that this approach will not work for selecting the backend.
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
+    torch.set_num_threads(1)
 
 
 class RLDSDataLoader:

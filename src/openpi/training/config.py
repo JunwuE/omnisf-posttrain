@@ -191,11 +191,15 @@ class DataConfigFactory(abc.ABC):
     def create_base_config(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         repo_id = self.repo_id if self.repo_id is not tyro.MISSING else None
         asset_id = self.assets.asset_id or repo_id
+        base_config = self.base_config or DataConfig()
+        norm_stats = base_config.norm_stats
+        if norm_stats is None:
+            norm_stats = self._load_norm_stats(epath.Path(self.assets.assets_dir or assets_dirs), asset_id)
         return dataclasses.replace(
-            self.base_config or DataConfig(),
+            base_config,
             repo_id=repo_id,
             asset_id=asset_id,
-            norm_stats=self._load_norm_stats(epath.Path(self.assets.assets_dir or assets_dirs), asset_id),
+            norm_stats=norm_stats,
             use_quantile_norm=model_config.model_type != ModelType.PI0,
         )
 
@@ -226,6 +230,7 @@ class MixedDataConfig(DataConfig):
 
     components: Sequence[DataConfig] = ()
     weights: Sequence[float] = ()
+    fast_local_loading: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -244,6 +249,12 @@ class MixedLeRobotDataConfig(DataConfigFactory):
     sources: Sequence[MixedDataSourceConfig] = ()
     pad_camera_params: bool = False
     use_eef_action: bool = False
+
+    # Optimize initialization of large mixtures of immutable local LeRobot datasets.
+    # Note: setting this to True will disable the dataset validation process.
+    # So load each component manually to check its completeness before setting this to True.
+    fast_local_loading: bool = False
+
     # If set, overrides the normalization mode for the mixed config and every component.
     # If None, each component keeps the normalization mode selected by its own factory.
     use_quantile_norm: bool | None = None
@@ -264,6 +275,10 @@ class MixedLeRobotDataConfig(DataConfigFactory):
                     assets=AssetsConfig(
                         assets_dir=self.assets.assets_dir,
                         asset_id=shared_config.asset_id,
+                    ),
+                    base_config=dataclasses.replace(
+                        source_dataset.data_factory.base_config or DataConfig(),
+                        norm_stats=shared_config.norm_stats,
                     ),
                 )
                 component = component_factory.create(assets_dirs, model_config)
@@ -295,6 +310,7 @@ class MixedLeRobotDataConfig(DataConfigFactory):
             components=components,
             weights=weights,
             pad_camera_params=self.pad_camera_params,
+            fast_local_loading=self.fast_local_loading,
         )
 
 
@@ -1039,8 +1055,8 @@ class TrainConfig:
     batch_size: int = 32
     # Number of micro-batches whose gradients are averaged before each optimizer update.
     gradient_accumulation_steps: int = 1
-    # Number of workers to use for the data loader. Increasing this number will speed up data loading but
-    # will increase memory and CPU usage.
+    # Number of data loader workers per training process. Increasing this number will speed up data loading but
+    # will increase memory and CPU usage on every rank.
     num_workers: int = 2
     # Number of optimizer update steps to run.
     num_train_steps: int = 30_000
