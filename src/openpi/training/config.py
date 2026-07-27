@@ -183,6 +183,9 @@ class DataConfigFactory(abc.ABC):
     assets: AssetsConfig = dataclasses.field(default_factory=AssetsConfig)
     # Base config that will be updated by the factory.
     base_config: tyro.conf.Suppress[DataConfig | None] = None
+    # Overrides the model's default normalization mode when set. 
+    # None means model's default normalization mode. True/False means quantile/z-score normalization, respectively.
+    use_quantile_norm: bool | None = None
 
     @abc.abstractmethod
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -200,7 +203,11 @@ class DataConfigFactory(abc.ABC):
             repo_id=repo_id,
             asset_id=asset_id,
             norm_stats=norm_stats,
-            use_quantile_norm=model_config.model_type != ModelType.PI0,
+            use_quantile_norm=(
+                model_config.model_type != ModelType.PI0
+                if self.use_quantile_norm is None
+                else self.use_quantile_norm
+            ),
         )
 
     def _load_norm_stats(self, assets_dir: epath.Path, asset_id: str | None) -> dict[str, _transforms.NormStats] | None:
@@ -1905,7 +1912,7 @@ def load_external_configs(directory_path: str) -> list[TrainConfig]:
 
     return external_configs
 
-EXTERNAL_CONFIG_DIR = "src/openpi/external_config"
+EXTERNAL_CONFIG_DIR = "/data/user/wsong890/lifuhao/omnisf-main/src/openpi/external_config"
 _CONFIGS.extend(load_external_configs(EXTERNAL_CONFIG_DIR))
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
