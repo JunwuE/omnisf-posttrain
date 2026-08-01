@@ -55,7 +55,7 @@ class Config:
 @dataclasses.dataclass(frozen=True)
 class HiddenCaptureSpec:
     expert_index: int
-    layer_index: int
+    layer_index: int | None
     token_count: int | None = None
 
 
@@ -356,9 +356,12 @@ class Block(nn.Module):
             if hidden is not None:
                 if capture_spec.token_count is not None:
                     hidden = hidden[:, :capture_spec.token_count, :]
-                should_capture = jnp.logical_and(layer_index == capture_spec.layer_index, jnp.logical_not(capture_found))
-                captured_hidden = jax.lax.select(should_capture, hidden, captured_hidden)
-                capture_state = (jnp.logical_or(capture_found, should_capture), captured_hidden)
+                if capture_spec.layer_index is None:
+                    capture_state = (capture_found, captured_hidden.at[:, layer_index].set(hidden))
+                else:
+                    should_capture = jnp.logical_and(layer_index == capture_spec.layer_index, jnp.logical_not(capture_found))
+                    captured_hidden = jax.lax.select(should_capture, hidden, captured_hidden)
+                    capture_state = (jnp.logical_or(capture_found, should_capture), captured_hidden)
 
         return (xs, capture_state), kv_cache
 
@@ -440,9 +443,14 @@ class Module(nn.Module):
         if hidden_capture is not None:
             hidden = embedded[hidden_capture.expert_index]
             token_count = hidden.shape[1] if hidden_capture.token_count is None else hidden_capture.token_count
+            capture_shape = (
+                (hidden.shape[0], self.configs[0].depth, token_count, hidden.shape[2])
+                if hidden_capture.layer_index is None
+                else (hidden.shape[0], token_count, hidden.shape[2])
+            )
             capture_state = (
                 jnp.array(False),
-                jnp.zeros((hidden.shape[0], token_count, hidden.shape[2]), dtype=hidden.dtype),
+                jnp.zeros(capture_shape, dtype=hidden.dtype),
             )
 
         (embedded, capture_state), kv_cache = self.layers(

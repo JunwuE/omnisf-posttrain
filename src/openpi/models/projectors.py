@@ -20,12 +20,13 @@ class AlignProjector(nnx.Module):
         self.iSF_zscore = bool(config.iSF_zscore)
         self.use_vlm_norm = bool(config.use_vlm_norm)
 
-        if self.vla_adapt_layers_align or self.vggt_adapt_layers_align:
-            raise NotImplementedError("JAX-align currently supports fixed VLA/VGGT layer alignment only.")
-
         self.fc1 = nnx.Linear(self.llm_dim, 2 * self.vggt_dim, rngs=rngs)
         self.fc2 = nnx.Linear(2 * self.vggt_dim, 2 * self.vggt_dim, rngs=rngs)
         self.vlm_norm = nnx.LayerNorm(self.llm_dim, rngs=rngs) if self.use_vlm_norm else None
+        if self.vla_adapt_layers_align:
+            self.vla_gate = nnx.Linear(self.llm_dim, 2 * self.vggt_dim, rngs=rngs)
+        if self.vggt_adapt_layers_align:
+            self.vggt_gate = nnx.Linear(2 * self.vggt_dim, 2 * self.vggt_dim, rngs=rngs)
 
     def spatial_zscore(self, feat: jax.Array, eps: float = 1e-6) -> jax.Array:
         mean = jnp.mean(feat, axis=1, keepdims=True)
@@ -47,11 +48,16 @@ class AlignProjector(nnx.Module):
         target_emb: jax.Array,
         align_mask: jax.Array,
     ) -> jax.Array:
-        if llm_embs.ndim != 3:
-            raise ValueError(f"Expected llm_embs rank 3 [batch, token, dim], got shape {llm_embs.shape}.")
+        expected_rank = 4 if self.vla_adapt_layers_align else 3
+        if llm_embs.ndim != expected_rank:
+            raise ValueError(f"Expected llm_embs rank {expected_rank}, got shape {llm_embs.shape}.")
 
         llm_embs, target_emb, align_mask = sharding.activation_sharding_constraint((llm_embs, target_emb, align_mask))
         llm_emb = self.align_dimension(llm_embs)
+        if self.vla_adapt_layers_align:
+            llm_emb = jnp.sum(llm_emb * jax.nn.sigmoid(self.vla_gate(llm_embs)), axis=1)
+        if self.vggt_adapt_layers_align:
+            target_emb = jnp.sum(target_emb * jax.nn.sigmoid(self.vggt_gate(target_emb)), axis=1)
         target_emb = target_emb.astype(llm_emb.dtype)
         if self.iSF_zscore:
             target_emb = self.spatial_zscore(target_emb)

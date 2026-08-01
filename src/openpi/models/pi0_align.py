@@ -20,6 +20,7 @@ class Pi0Align(pi0.Pi0):
             if config.vla_layers_align >= 0
             else paligemma_config.depth + config.vla_layers_align
         )
+        self.vla_adapt_layers_align = bool(config.vla_adapt_layers_align)
         self.align_projector = projectors.AlignProjector(paligemma_config.width, config, rngs)
         self.align_loss_coeff = config.align_loss_coeff
 
@@ -28,7 +29,7 @@ class Pi0Align(pi0.Pi0):
         rng: at.KeyArrayLike,
         observation: _model.Observation,
         actions: _model.Actions,
-        align_targets: at.Float[at.Array, "b s d"],
+        align_targets: at.Float[at.Array, "b *layers s d"],
         align_mask: at.Bool[at.Array, "b s"],
         *,
         train: bool = False,
@@ -52,7 +53,7 @@ class Pi0Align(pi0.Pi0):
         positions = jnp.cumsum(input_mask, axis=1) - 1
         hidden_capture = _gemma.HiddenCaptureSpec(
             expert_index=0,  # paligemma, not action_expert
-            layer_index=self.vla_layers_align,
+            layer_index=None if self.vla_adapt_layers_align else self.vla_layers_align,
             token_count=image_token_count,
         )
         (prefix_out, suffix_out), _, vision_hidden = self.PaliGemma.llm(

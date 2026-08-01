@@ -197,7 +197,7 @@ def _compute_loss_and_grads(
     state: training_utils.TrainState,
     model: _model.BaseModel,
     batch: tuple[_model.Observation, _model.Actions],
-    align_targets: at.Float[at.Array, "b s d"],
+    align_targets: at.Float[at.Array, "b *layers s d"],
     align_mask: at.Bool[at.Array, "b s"],
     micro_step: at.Int[at.ArrayLike, ""],
 ) -> tuple[tuple[at.Array, at.Array, at.Array], at.Params]:
@@ -231,7 +231,7 @@ def train_step(
     rng: at.KeyArrayLike,
     state: training_utils.TrainState,
     batch: tuple[_model.Observation, _model.Actions],
-    align_targets: at.Float[at.Array, "b s d"],
+    align_targets: at.Float[at.Array, "b *layers s d"],
     align_mask: at.Bool[at.Array, "b s"],
 ) -> tuple[training_utils.TrainState, dict[str, at.Array]]:
     model = nnx.merge(state.model_def, state.params)
@@ -250,7 +250,7 @@ def accumulate_train_step(
     state: training_utils.TrainState,
     gradient_accumulator: at.Params,
     batch: tuple[_model.Observation, _model.Actions],
-    align_targets: at.Float[at.Array, "b s d"],
+    align_targets: at.Float[at.Array, "b *layers s d"],
     align_mask: at.Bool[at.Array, "b s"],
     micro_step: at.Int[at.ArrayLike, ""],
 ) -> tuple[at.Params, dict[str, at.Array]]:

@@ -181,6 +181,7 @@ class _TorchAlignFeatureShard:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         with torch.cuda.device(self.device):
             images, img_padding_mask, img_masks = self._prepare_images(observation)
+            feature_layer = None if self.config.vggt_adapt_layers_align else self.config.vggt_layers_align
 
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 if self.target_model == "omnivggt" and self.config.use_camera_params:
@@ -193,31 +194,37 @@ class _TorchAlignFeatureShard:
                         extrinsics=extrinsics,
                         intrinsics=intrinsics,
                         camera_gt_index=camera_param_mask,
-                        feature_layer=self.config.vggt_layers_align,
+                        feature_layer=feature_layer,
                     )
                 else:
                     vggt_images = preprocess_images_from_openpi(images)
                     features, patch_start_idx = self.model.aggregator(
-                        vggt_images, feature_layer=self.config.vggt_layers_align
+                        vggt_images, feature_layer=feature_layer
                     )
 
-            vggt_hidden = features[0][:, :, patch_start_idx:, :]
+            vggt_hidden = [feature[:, :, patch_start_idx:, :] for feature in features]
 
             h, w = vggt_images.shape[-2:]
             patch_h, patch_w = h // self.model.patch_size, w // self.model.patch_size
             reference = torch.zeros(
                 (vggt_images.shape[0], reference_tokens, 1),
-                dtype=vggt_hidden.dtype,
+                dtype=vggt_hidden[0].dtype,
                 device=self.device,
             )
-            target = custom_pooling(
-                vggt_hidden,
-                (patch_h, patch_w),
-                (h, w),
-                reference,
-                self.config.pooling_func,
-                self.config.use_vggt_pe,
-            ).float()
+            pooled_hidden = [
+                custom_pooling(
+                    hidden,
+                    (patch_h, patch_w),
+                    (h, w),
+                    reference,
+                    self.config.pooling_func,
+                    self.config.use_vggt_pe,
+                )
+                for hidden in vggt_hidden
+            ]
+            target = (
+                torch.stack(pooled_hidden, dim=1) if self.config.vggt_adapt_layers_align else pooled_hidden[0].float()
+            )
             mask = self._make_align_mask(img_masks, img_padding_mask, reference_tokens)
             return (
                 target.to(torch.bfloat16).contiguous().detach(),

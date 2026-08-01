@@ -181,3 +181,4 @@ piper_pinocchio.py
 slurm_logs/
 experimental_results/
 third_party/
+logs/
