@@ -29,6 +29,7 @@ import openpi.policies.robotwin_policy as robotwin_policy
 import openpi.policies.interndata_policy as interndata_policy
 import openpi.policies.robocoin_policy as robocoin_policy
 import openpi.policies.agibotbeta_policy as agibotbeta_policy
+import openpi.policies.olapiper_policy as olapiper_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -1031,6 +1032,74 @@ class LeRobotAgibotBetaDataConfig(DataConfigFactory):
         data_transforms = _transforms.Group(
             inputs=[agibotbeta_policy.AgibotBetaInputs(use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
             outputs=[agibotbeta_policy.AgibotBetaOutputs(use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
+        )
+        rpy_mask = _transforms.make_bool_mask(-3, 3, -1, -3, 3, -1)
+        if self.use_so3_rpy:
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.EulerToRotvec(rpy_mask)],
+                outputs=[_transforms.RotvecToEuler(rpy_mask)],
+            )
+        if self.use_delta_actions:
+            delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
+            so3_mask = rpy_mask if self.use_so3_rpy else None
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask, so3_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask, so3_mask)],
+            )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotOlaPiperDataConfig(DataConfigFactory):
+    # If true, will convert joint dimensions to deltas with respect to the current state before passing to the model.
+    # Gripper dimensions will remain in absolute values.
+    use_delta_actions: bool = True
+    # use eef instead of joint as action and state representations.
+    use_eef_action: bool = True
+    # If true, represent EEF states and rotation actions as SO3 rotation vectors.
+    use_so3_rpy: bool = False
+    # Convert gripper values to a unified representation (0 = closed, 1 = open).
+    unified_gripper: bool = False
+
+    # Repack transforms.
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.right_front",
+                        "cam_left_wrist": "observation.images.left_wrist",
+                        "cam_right_wrist": "observation.images.right_wrist",
+                    },
+                    "joint_state": "observation.state",
+                    "eef_state": "observation.ee_pose",
+                    "joint_actions": "action",
+                    "eef_actions": "action.ee_pose",
+                    "prompt": "prompt",
+                })
+            ]
+        )
+    )
+    # Action keys that will be used to read the action sequence from the dataset.
+    action_sequence_keys: Sequence[str] = ("action", "action.ee_pose")
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        if self.use_so3_rpy and not self.use_eef_action:
+            raise ValueError("SO(3) rotation vectors require EEF actions to be enabled")
+
+        data_transforms = _transforms.Group(
+            inputs=[olapiper_policy.OlaPiperInputs(use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
+            outputs=[olapiper_policy.OlaPiperOutputs(use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
         )
         rpy_mask = _transforms.make_bool_mask(-3, 3, -1, -3, 3, -1)
         if self.use_so3_rpy:
