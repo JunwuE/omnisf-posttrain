@@ -230,9 +230,8 @@ class DeltaActions(DataTransformFn):
     # can be smaller than the actual number of dimensions. If None, this transform is a no-op.
     # See `make_bool_mask` for more details.
     mask: Sequence[bool] | None
-    # If true, convert the RPY dimensions selected by `rpy_mask` to world-frame rotation vectors.
-    use_so3: bool = False
-    rpy_mask: Sequence[bool] | None = None
+    # Optional mask for rotvec dimensions that use SO(3) composition instead of component-wise subtraction.
+    rotation_mask: Sequence[bool] | None = None
 
     def __call__(self, data: DataDict) -> DataDict:
         if "actions" not in data or self.mask is None:
@@ -241,26 +240,20 @@ class DeltaActions(DataTransformFn):
         state, actions = data["state"], data["actions"]
         mask = np.asarray(self.mask)
         dims = mask.shape[-1]
-        if not self.use_so3:
-            actions[..., :dims] -= np.expand_dims(np.where(mask, state[..., :dims], 0), axis=-2)
-        else:
-            if self.rpy_mask is None:
-                raise ValueError("rpy_mask is required when use_so3=True")
-            rpy_mask = np.asarray(self.rpy_mask)
-            linear_mask = mask & ~rpy_mask
-            actions[..., :dims] -= np.expand_dims(np.where(linear_mask, state[..., :dims], 0), axis=-2)
+        linear_mask = mask if self.rotation_mask is None else mask & ~np.asarray(self.rotation_mask)
+        actions[..., :dims] -= np.expand_dims(np.where(linear_mask, state[..., :dims], 0), axis=-2)
 
-            state_rpy = state[..., :dims][..., rpy_mask]
-            action_rpy = actions[..., :dims][..., rpy_mask]
-            state_rotation = Rotation.from_euler("xyz", state_rpy.reshape(-1, 3)).as_matrix()
-            action_rotation = Rotation.from_euler("xyz", action_rpy.reshape(-1, 3)).as_matrix()
-            state_rotation = state_rotation.reshape((*state_rpy.shape[:-1], -1, 3, 3))
-            action_rotation = action_rotation.reshape((*action_rpy.shape[:-1], -1, 3, 3))
-
-            # Compose the rotations in the world frame to get the delta rotation.
+        if self.rotation_mask is not None:
+            rotation_mask = np.asarray(self.rotation_mask)
+            state_rotvec = state[..., rotation_mask]
+            action_rotvec = actions[..., rotation_mask]
+            state_rotation = Rotation.from_rotvec(state_rotvec.reshape(-1, 3)).as_matrix()
+            action_rotation = Rotation.from_rotvec(action_rotvec.reshape(-1, 3)).as_matrix()
+            state_rotation = state_rotation.reshape((*state_rotvec.shape[:-1], -1, 3, 3))
+            action_rotation = action_rotation.reshape((*action_rotvec.shape[:-1], -1, 3, 3))
             delta_rotation = action_rotation @ np.swapaxes(np.expand_dims(state_rotation, axis=-4), -1, -2)
-            delta_rotvec = Rotation.from_matrix(delta_rotation.reshape(-1, 3, 3)).as_rotvec().reshape(action_rpy.shape)
-            actions[..., :dims][..., rpy_mask] = delta_rotvec
+            delta_rotvec = Rotation.from_matrix(delta_rotation.reshape(-1, 3, 3)).as_rotvec().reshape(action_rotvec.shape)
+            actions[..., rotation_mask] = delta_rotvec
 
         data["actions"] = actions
 
@@ -275,9 +268,8 @@ class AbsoluteActions(DataTransformFn):
     # can be smaller than the actual number of dimensions. If None, this transform is a no-op.
     # See `make_bool_mask` for more details.
     mask: Sequence[bool] | None
-    # If true, compose the rotation vectors selected by `rpy_mask` in the world frame.
-    use_so3: bool = False
-    rpy_mask: Sequence[bool] | None = None
+    # Optional mask for rotvec dimensions that use SO(3) composition instead of component-wise addition.
+    rotation_mask: Sequence[bool] | None = None
 
     def __call__(self, data: DataDict) -> DataDict:
         if "actions" not in data or self.mask is None:
@@ -286,31 +278,61 @@ class AbsoluteActions(DataTransformFn):
         state, actions = data["state"], data["actions"]
         mask = np.asarray(self.mask)
         dims = mask.shape[-1]
-        if not self.use_so3:
-            actions[..., :dims] += np.expand_dims(np.where(mask, state[..., :dims], 0), axis=-2)
-        else:
-            if self.rpy_mask is None:
-                raise ValueError("rpy_mask is required when use_so3=True")
-            rpy_mask = np.asarray(self.rpy_mask)
-            linear_mask = mask & ~rpy_mask
-            actions[..., :dims] += np.expand_dims(np.where(linear_mask, state[..., :dims], 0), axis=-2)
+        linear_mask = mask if self.rotation_mask is None else mask & ~np.asarray(self.rotation_mask)
+        actions[..., :dims] += np.expand_dims(np.where(linear_mask, state[..., :dims], 0), axis=-2)
 
-            state_rpy = state[..., :dims][..., rpy_mask]
-            action_rotvec = actions[..., :dims][..., rpy_mask]
-            state_rotation = Rotation.from_euler("xyz", state_rpy.reshape(-1, 3)).as_matrix()
-            delta_rotation = Rotation.from_rotvec(action_rotvec.reshape(-1, 3)).as_matrix()
-            state_rotation = state_rotation.reshape((*state_rpy.shape[:-1], -1, 3, 3))
-            delta_rotation = delta_rotation.reshape((*action_rotvec.shape[:-1], -1, 3, 3))
+        if self.rotation_mask is not None:
+            rotation_mask = np.asarray(self.rotation_mask)
+            state_rotvec = state[..., rotation_mask]
+            delta_rotvec = actions[..., :dims][..., rotation_mask]
+            state_rotation = Rotation.from_rotvec(state_rotvec.reshape(-1, 3)).as_matrix()
+            delta_rotation = Rotation.from_rotvec(delta_rotvec.reshape(-1, 3)).as_matrix()
+            state_rotation = state_rotation.reshape((*state_rotvec.shape[:-1], -1, 3, 3))
+            delta_rotation = delta_rotation.reshape((*delta_rotvec.shape[:-1], -1, 3, 3))
             action_rotation = delta_rotation @ np.expand_dims(state_rotation, axis=-4)
-            action_rpy = (
-                Rotation.from_matrix(action_rotation.reshape(-1, 3, 3))
-                .as_euler("xyz")
-                .reshape(action_rotvec.shape)
-            )
-            actions[..., :dims][..., rpy_mask] = action_rpy
-            
+            action_rotvec = Rotation.from_matrix(action_rotation.reshape(-1, 3, 3)).as_rotvec().reshape(delta_rotvec.shape)
+            actions[..., :dims][..., rotation_mask] = action_rotvec
+
         data["actions"] = actions
 
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
+class EulerToRotvec(DataTransformFn):
+    """Converts absolute Euler rotations in state and actions to rotation vectors."""
+
+    rotation_mask: Sequence[bool]
+
+    def __call__(self, data: DataDict) -> DataDict:
+        mask = np.asarray(self.rotation_mask)
+        state_euler = data["state"][..., mask]
+        state_rotvec = Rotation.from_euler("xyz", state_euler.reshape(-1, 3)).as_rotvec().reshape(state_euler.shape)
+        data["state"][..., mask] = state_rotvec
+
+        if "actions" in data:
+            action_euler = data["actions"][..., mask]
+            action_rotvec = (
+                Rotation.from_euler("xyz", action_euler.reshape(-1, 3)).as_rotvec().reshape(action_euler.shape)
+            )
+            data["actions"][..., mask] = action_rotvec
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
+class RotvecToEuler(DataTransformFn):
+    """Converts absolute action rotation vectors back to Euler rotations."""
+
+    rotation_mask: Sequence[bool]
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "actions" not in data:
+            return data
+        mask = np.asarray(self.rotation_mask)
+        dims = mask.shape[-1]
+        action_rotvec = data["actions"][..., :dims][..., mask]
+        action_euler = Rotation.from_rotvec(action_rotvec.reshape(-1, 3)).as_euler("xyz").reshape(action_rotvec.shape)
+        data["actions"][..., :dims][..., mask] = action_euler
         return data
 
 

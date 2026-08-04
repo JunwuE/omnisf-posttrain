@@ -403,8 +403,8 @@ class LeRobotAgilexDataConfig(DataConfigFactory):
     adapt_to_pi: bool = False
     # use eef instead of joint as action and state representations.
     use_eef_action: bool = False
-    # If true, represent EEF rotation deltas as world-frame rotation vectors.
-    use_so3_delta_rpy: bool = False
+    # If true, represent EEF states and rotation actions as SO3 rotation vectors.
+    use_so3_rpy: bool = False
     # Convert gripper values to a unified representation (0 = closed, 1 = open).
     unified_gripper: bool = False
 
@@ -430,27 +430,25 @@ class LeRobotAgilexDataConfig(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        if self.use_so3_delta_rpy and (not self.use_eef_action or not self.use_delta_joint_actions):
-            raise ValueError("SO(3) delta actions require EEF actions and delta actions to be enabled")
+        if self.use_so3_rpy and not self.use_eef_action:
+            raise ValueError("SO(3) rotation vectors require EEF actions to be enabled")
 
         data_transforms = _transforms.Group(
             inputs=[agilex_policy.AgilexInputs(adapt_to_pi=self.adapt_to_pi, use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
             outputs=[agilex_policy.AgilexOutputs(adapt_to_pi=self.adapt_to_pi, use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
         )
+        rpy_mask = _transforms.make_bool_mask(-3, 3, -1, -3, 3, -1)
+        if self.use_so3_rpy:
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.EulerToRotvec(rpy_mask)],
+                outputs=[_transforms.RotvecToEuler(rpy_mask)],
+            )
         if self.use_delta_joint_actions:
             delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
-            rpy_mask = _transforms.make_bool_mask(-3, 3, -1, -3, 3, -1)
+            so3_mask = rpy_mask if self.use_so3_rpy else None
             data_transforms = data_transforms.push(
-                inputs=[
-                    _transforms.DeltaActions(
-                        delta_action_mask, use_so3=self.use_so3_delta_rpy, rpy_mask=rpy_mask
-                    )
-                ],
-                outputs=[
-                    _transforms.AbsoluteActions(
-                        delta_action_mask, use_so3=self.use_so3_delta_rpy, rpy_mask=rpy_mask
-                    )
-                ],
+                inputs=[_transforms.DeltaActions(delta_action_mask, so3_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask, so3_mask)],
             )
 
         model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
@@ -477,8 +475,8 @@ class LeRobotRobotwinDataConfig(DataConfigFactory):
     adapt_to_pi: bool = False
     # use eef instead of joint as action and state representations.
     use_eef_action: bool = False
-    # If true, represent EEF rotation deltas as world-frame rotation vectors.
-    use_so3_delta_rpy: bool = False
+    # If true, represent EEF states and rotation actions as SO3 rotation vectors.
+    use_so3_rpy: bool = False
 
     # Repack transforms.
     repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
@@ -502,27 +500,25 @@ class LeRobotRobotwinDataConfig(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        if self.use_so3_delta_rpy and (not self.use_eef_action or not self.use_delta_joint_actions):
-            raise ValueError("SO(3) delta actions require EEF actions and delta actions to be enabled")
+        if self.use_so3_rpy and not self.use_eef_action:
+            raise ValueError("SO(3) rotation vectors require EEF actions to be enabled")
 
         data_transforms = _transforms.Group(
             inputs=[robotwin_policy.RobotwinInputs(adapt_to_pi=self.adapt_to_pi, use_eef_action=self.use_eef_action)],
             outputs=[robotwin_policy.RobotwinOutputs(adapt_to_pi=self.adapt_to_pi, use_eef_action=self.use_eef_action)],
         )
+        rpy_mask = _transforms.make_bool_mask(-3, 3, -1, -3, 3, -1)
+        if self.use_so3_rpy:
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.EulerToRotvec(rpy_mask)],
+                outputs=[_transforms.RotvecToEuler(rpy_mask)],
+            )
         if self.use_delta_joint_actions:
             delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
-            rpy_mask = _transforms.make_bool_mask(-3, 3, -1, -3, 3, -1)
+            so3_mask = rpy_mask if self.use_so3_rpy else None
             data_transforms = data_transforms.push(
-                inputs=[
-                    _transforms.DeltaActions(
-                        delta_action_mask, use_so3=self.use_so3_delta_rpy, rpy_mask=rpy_mask
-                    )
-                ],
-                outputs=[
-                    _transforms.AbsoluteActions(
-                        delta_action_mask, use_so3=self.use_so3_delta_rpy, rpy_mask=rpy_mask
-                    )
-                ],
+                inputs=[_transforms.DeltaActions(delta_action_mask, so3_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask, so3_mask)],
             )
 
         model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
@@ -549,8 +545,8 @@ class LeRobotInterndataDataConfig(DataConfigFactory):
     adapt_to_pi: bool = False
     # use eef instead of joint as action and state representations.
     use_eef_action: bool = False
-    # If true, represent EEF rotation deltas as world-frame rotation vectors.
-    use_so3_delta_rpy: bool = False
+    # If true, represent EEF states and rotation actions as SO3 rotation vectors.
+    use_so3_rpy: bool = False
     # Convert gripper values to a unified representation (0 = closed, 1 = open).
     unified_gripper: bool = False
 
@@ -587,27 +583,25 @@ class LeRobotInterndataDataConfig(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        if self.use_so3_delta_rpy and (not self.use_eef_action or not self.use_delta_joint_actions):
-            raise ValueError("SO(3) delta actions require EEF actions and delta actions to be enabled")
+        if self.use_so3_rpy and not self.use_eef_action:
+            raise ValueError("SO(3) rotation vectors require EEF actions to be enabled")
 
         data_transforms = _transforms.Group(
             inputs=[interndata_policy.InterndataInputs(adapt_to_pi=self.adapt_to_pi, use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
             outputs=[interndata_policy.InterndataOutputs(adapt_to_pi=self.adapt_to_pi, use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
         )
+        rpy_mask = _transforms.make_bool_mask(-3, 3, -1, -3, 3, -1)
+        if self.use_so3_rpy:
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.EulerToRotvec(rpy_mask)],
+                outputs=[_transforms.RotvecToEuler(rpy_mask)],
+            )
         if self.use_delta_joint_actions:
             delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
-            rpy_mask = _transforms.make_bool_mask(-3, 3, -1, -3, 3, -1)
+            so3_mask = rpy_mask if self.use_so3_rpy else None
             data_transforms = data_transforms.push(
-                inputs=[
-                    _transforms.DeltaActions(
-                        delta_action_mask, use_so3=self.use_so3_delta_rpy, rpy_mask=rpy_mask
-                    )
-                ],
-                outputs=[
-                    _transforms.AbsoluteActions(
-                        delta_action_mask, use_so3=self.use_so3_delta_rpy, rpy_mask=rpy_mask
-                    )
-                ],
+                inputs=[_transforms.DeltaActions(delta_action_mask, so3_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask, so3_mask)],
             )
 
         model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
@@ -855,8 +849,8 @@ class LeRobotDroidDreamzeroDataConfig(DataConfigFactory):
     """
     # use eef instead of joint as action and state representations.
     use_eef_action: bool = False
-    # If true, represent EEF rotation deltas as world-frame rotation vectors.
-    use_so3_delta_rpy: bool = False
+    # If true, represent EEF states and rotation actions as SO3 rotation vectors.
+    use_so3_rpy: bool = False
     # If true, will convert actions to deltas with respect to the current state before passing to the model.
     # Gripper dimensions will remain in absolute values.
     use_delta_actions: bool = True
@@ -865,8 +859,8 @@ class LeRobotDroidDreamzeroDataConfig(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        if self.use_so3_delta_rpy and (not self.use_eef_action or not self.use_delta_actions):
-            raise ValueError("SO(3) delta actions require EEF actions and delta actions to be enabled")
+        if self.use_so3_rpy and not self.use_eef_action:
+            raise ValueError("SO(3) rotation vectors require EEF actions to be enabled")
 
         repack_transform = _transforms.Group(
             inputs=[
@@ -889,24 +883,21 @@ class LeRobotDroidDreamzeroDataConfig(DataConfigFactory):
             inputs=[droid_dreamzero_policy.DroidInputs(model_type=model_config.model_type, use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
             outputs=[droid_dreamzero_policy.DroidOutputs(use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
         )
+        rpy_mask = _transforms.make_bool_mask(-3, 3, -1)
+        if self.use_so3_rpy:
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.EulerToRotvec(rpy_mask)],
+                outputs=[_transforms.RotvecToEuler(rpy_mask)],
+            )
         if self.use_delta_actions:
             if self.use_eef_action:
                 delta_action_mask = _transforms.make_bool_mask(6, -1)
-                rpy_mask = _transforms.make_bool_mask(-3, 3, -1)
             else:
                 delta_action_mask = _transforms.make_bool_mask(7, -1)
-                rpy_mask = None
+            so3_mask = rpy_mask if self.use_so3_rpy else None
             data_transforms = data_transforms.push(
-                inputs=[
-                    _transforms.DeltaActions(
-                        delta_action_mask, use_so3=self.use_so3_delta_rpy, rpy_mask=rpy_mask
-                    )
-                ],
-                outputs=[
-                    _transforms.AbsoluteActions(
-                        delta_action_mask, use_so3=self.use_so3_delta_rpy, rpy_mask=rpy_mask
-                    )
-                ],
+                inputs=[_transforms.DeltaActions(delta_action_mask, so3_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask, so3_mask)],
             )
         model_transforms = ModelTransformFactory()(model_config)
 
@@ -926,8 +917,8 @@ class LeRobotRobocoinDataConfig(DataConfigFactory):
     use_delta_actions: bool = True
     # use eef instead of joint as action and state representations.
     use_eef_action: bool = True
-    # If true, represent EEF rotation deltas as world-frame rotation vectors.
-    use_so3_delta_rpy: bool = False
+    # If true, represent EEF states and rotation actions as SO3 rotation vectors.
+    use_so3_rpy: bool = False
     # Convert gripper values to a unified representation (0 = closed, 1 = open).
     unified_gripper: bool = False
 
@@ -955,27 +946,25 @@ class LeRobotRobocoinDataConfig(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        if self.use_so3_delta_rpy and (not self.use_eef_action or not self.use_delta_actions):
-            raise ValueError("SO(3) delta actions require EEF actions and delta actions to be enabled")
+        if self.use_so3_rpy and not self.use_eef_action:
+            raise ValueError("SO(3) rotation vectors require EEF actions to be enabled")
 
         data_transforms = _transforms.Group(
             inputs=[robocoin_policy.RobocoinInputs(use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
             outputs=[robocoin_policy.RobocoinOutputs(use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
         )
+        rpy_mask = _transforms.make_bool_mask(-3, 3, -1, -3, 3, -1)
+        if self.use_so3_rpy:
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.EulerToRotvec(rpy_mask)],
+                outputs=[_transforms.RotvecToEuler(rpy_mask)],
+            )
         if self.use_delta_actions:
             delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
-            rpy_mask = _transforms.make_bool_mask(-3, 3, -1, -3, 3, -1)
+            so3_mask = rpy_mask if self.use_so3_rpy else None
             data_transforms = data_transforms.push(
-                inputs=[
-                    _transforms.DeltaActions(
-                        delta_action_mask, use_so3=self.use_so3_delta_rpy, rpy_mask=rpy_mask
-                    )
-                ],
-                outputs=[
-                    _transforms.AbsoluteActions(
-                        delta_action_mask, use_so3=self.use_so3_delta_rpy, rpy_mask=rpy_mask
-                    )
-                ],
+                inputs=[_transforms.DeltaActions(delta_action_mask, so3_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask, so3_mask)],
             )
 
         model_transforms = ModelTransformFactory()(model_config)
@@ -996,8 +985,8 @@ class LeRobotAgibotBetaDataConfig(DataConfigFactory):
     use_delta_actions: bool = True
     # use eef instead of joint as action and state representations.
     use_eef_action: bool = True
-    # If true, represent EEF rotation deltas as world-frame rotation vectors.
-    use_so3_delta_rpy: bool = False
+    # If true, represent EEF states and rotation actions as SO3 rotation vectors.
+    use_so3_rpy: bool = False
     # Convert gripper values to a unified representation (0 = closed, 1 = open).
     unified_gripper: bool = False
 
@@ -1036,31 +1025,25 @@ class LeRobotAgibotBetaDataConfig(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        if self.use_so3_delta_rpy and (not self.use_eef_action or not self.use_delta_actions):
-            raise ValueError("SO(3) delta actions require EEF actions and delta actions to be enabled")
+        if self.use_so3_rpy and not self.use_eef_action:
+            raise ValueError("SO(3) rotation vectors require EEF actions to be enabled")
 
         data_transforms = _transforms.Group(
             inputs=[agibotbeta_policy.AgibotBetaInputs(use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
             outputs=[agibotbeta_policy.AgibotBetaOutputs(use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
         )
-        if self.use_delta_actions:
-            if self.use_eef_action:
-                delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
-                rpy_mask = _transforms.make_bool_mask(-3, 3, -1, -3, 3, -1)
-            else:
-                delta_action_mask = _transforms.make_bool_mask(7, -1, 7, -1)
-                rpy_mask = None
+        rpy_mask = _transforms.make_bool_mask(-3, 3, -1, -3, 3, -1)
+        if self.use_so3_rpy:
             data_transforms = data_transforms.push(
-                inputs=[
-                    _transforms.DeltaActions(
-                        delta_action_mask, use_so3=self.use_so3_delta_rpy, rpy_mask=rpy_mask
-                    )
-                ],
-                outputs=[
-                    _transforms.AbsoluteActions(
-                        delta_action_mask, use_so3=self.use_so3_delta_rpy, rpy_mask=rpy_mask
-                    )
-                ],
+                inputs=[_transforms.EulerToRotvec(rpy_mask)],
+                outputs=[_transforms.RotvecToEuler(rpy_mask)],
+            )
+        if self.use_delta_actions:
+            delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
+            so3_mask = rpy_mask if self.use_so3_rpy else None
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask, so3_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask, so3_mask)],
             )
 
         model_transforms = ModelTransformFactory()(model_config)
