@@ -38,6 +38,8 @@ class LiberoInputs(transforms.DataTransformFn):
     # Determines which model will be used.
     # Do not change this for your own dataset.
     model_type: _model.ModelType
+    # Convert gripper values to a unified representation (0 = closed, 1 = open). Original values is (1 = closed, -1 = open).
+    unified_gripper: bool = False
 
     def __call__(self, data: dict) -> dict:
         # Possibly need to parse images to uint8 (H,W,C) since LeRobot automatically
@@ -72,7 +74,12 @@ class LiberoInputs(transforms.DataTransformFn):
         # Pad actions to the model action dimension. Keep this for your own dataset.
         # Actions are only available during training.
         if "actions" in data:
-            inputs["actions"] = data["actions"]
+            actions = data["actions"]
+            if self.unified_gripper:
+                gripper_actions = np.clip(actions[:, 6], -1, 1)
+                gripper_actions = (1 - gripper_actions) / 2
+                actions = np.concatenate([actions[:, :6], gripper_actions[:, None]], axis=-1)
+            inputs["actions"] = actions
 
         # Pass the prompt (aka language instruction) to the model.
         # Keep this for your own dataset (but modify the key if the instruction is not
@@ -94,10 +101,19 @@ class LiberoOutputs(transforms.DataTransformFn):
 
     For your own dataset, you can copy this class and modify the action dimension based on the comments below.
     """
+    # Convert gripper values to a unified representation (0 = closed, 1 = open). Original values is (1 = closed, -1 = open).
+    unified_gripper: bool = False
 
     def __call__(self, data: dict) -> dict:
         # Only return the first N actions -- since we padded actions above to fit the model action
         # dimension, we need to now parse out the correct number of actions in the return dict.
         # For Libero, we only return the first 7 actions (since the rest is padding).
         # For your own dataset, replace `7` with the action dimension of your dataset.
-        return {"actions": np.asarray(data["actions"][:, :7])}
+        actions = np.asarray(data["actions"][:, :7])
+
+        if self.unified_gripper:
+            gripper_actions = actions[:, 6]
+            gripper_actions = 1 - 2 * gripper_actions
+            actions = np.concatenate([actions[:, :6], gripper_actions[:, None]], axis=-1)
+
+        return {"actions": actions}
