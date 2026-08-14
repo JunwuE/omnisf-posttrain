@@ -27,6 +27,7 @@ import openpi.policies.libero_policy as libero_policy
 import openpi.policies.liberoplus_policy as liberoplus_policy
 import openpi.policies.agilex_policy as agilex_policy
 import openpi.policies.robotwin_policy as robotwin_policy
+import openpi.policies.robocasa_no_movement_policy as robocasa_no_movement_policy
 import openpi.policies.interndata_policy as interndata_policy
 import openpi.policies.robocoin_policy as robocoin_policy
 import openpi.policies.agibotbeta_policy as agibotbeta_policy
@@ -741,6 +742,50 @@ class LeRobotLiberoPlusDataConfig(DataConfigFactory):
             model_transforms=ModelTransformFactory()(model_config),
             action_sequence_keys=self.action_sequence_keys,
         )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotRoboCasaNoMovementDataConfig(DataConfigFactory):
+
+    # Convert gripper actions to a unified representation (0 = closed, 1 = open).
+    unified_gripper: bool = False
+
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/state": "observation.state",
+                        "observation/agentview_left": "observation.images.robot0_agentview_left",
+                        "observation/agentview_right": "observation.images.robot0_agentview_right",
+                        "observation/eye_in_hand": "observation.images.robot0_eye_in_hand",
+                        "actions": "action",
+                        "prompt": "prompt",
+                        "index": "index",
+                    }
+                )
+            ]
+        )
+    )
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[robocasa_no_movement_policy.RoboCasaInputs(unified_gripper=self.unified_gripper)],
+            outputs=[robocasa_no_movement_policy.RoboCasaOutputs(unified_gripper=self.unified_gripper)],
+        )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
 
 @dataclasses.dataclass(frozen=True)
 class RLDSDroidDataConfig(DataConfigFactory):
