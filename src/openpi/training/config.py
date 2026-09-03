@@ -23,6 +23,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.droid_dreamzero_policy as droid_dreamzero_policy
+import openpi.policies.molmoact_policy as molmoact_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.policies.liberoplus_policy as liberoplus_policy
 import openpi.policies.agilex_policy as agilex_policy
@@ -1002,6 +1003,78 @@ class LeRobotDroidDreamzeroDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
             action_sequence_keys=action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotMolmoActDataConfig(DataConfigFactory):
+    # use eef instead of joint as action and state representations.
+    use_eef_action: bool = True
+    # If true, represent EEF states and rotation actions as SO3 rotation vectors.
+    use_so3_rpy: bool = False
+    # If true, will convert actions to deltas with respect to the current state before passing to the model.
+    # Gripper dimensions will remain in absolute values.
+    use_delta_actions: bool = True
+    # Convert gripper values to a unified representation (0 = closed, 1 = open).
+    unified_gripper: bool = False
+
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {
+                            "primary": "observation.images.primary",
+                            "secondary": "observation.images.secondary",
+                            "wrist": "observation.images.wrist",
+                        },
+                        "state": "observation.state",
+                        "actions": "action.abs_ee_action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+    )
+    action_sequence_keys: Sequence[str] = ("action.abs_ee_action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        if self.use_so3_rpy and not self.use_eef_action:
+            raise ValueError("SO(3) rotation vectors require EEF actions to be enabled")
+        if not self.use_eef_action:
+            raise ValueError("MolmoAct data only supports EEF actions")
+
+        data_transforms = _transforms.Group(
+            inputs=[
+                molmoact_policy.MolmoActInputs(
+                    model_type=model_config.model_type,
+                    unified_gripper=self.unified_gripper,
+                )
+            ],
+            outputs=[molmoact_policy.MolmoActOutputs(unified_gripper=self.unified_gripper)],
+        )
+        rpy_mask = _transforms.make_bool_mask(-3, 3, -1)
+        if self.use_so3_rpy:
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.EulerToRotvec(rpy_mask)],
+                outputs=[_transforms.RotvecToEuler(rpy_mask)],
+            )
+        if self.use_delta_actions:
+            delta_action_mask = _transforms.make_bool_mask(6, -1)
+            so3_mask = rpy_mask if self.use_so3_rpy else None
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask, so3_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask, so3_mask)],
+            )
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
         )
 
 
