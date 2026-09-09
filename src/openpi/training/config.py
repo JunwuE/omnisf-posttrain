@@ -1418,6 +1418,8 @@ class TrainConfig:
 
     # Determines the data to be trained on.
     data: DataConfigFactory = dataclasses.field(default_factory=FakeDataConfig)
+    # Probability of hiding the robot state from each training sample.
+    state_dropout_prob: float = 0.0
 
     # Base directory for config assets (e.g., norm stats).
     assets_base_dir: str = "./assets"
@@ -1487,6 +1489,8 @@ class TrainConfig:
             raise ValueError("Cannot resume and overwrite at the same time.")
         if self.gradient_accumulation_steps < 1:
             raise ValueError("gradient_accumulation_steps must be at least 1.")
+        if not 0.0 <= self.state_dropout_prob <= 1.0:
+            raise ValueError("state_dropout_prob must be between 0 and 1.")
 
 
 # Use `get_config` if you need to get a config by name in your code.

@@ -1,4 +1,5 @@
 from collections.abc import Iterator, Sequence
+import dataclasses
 import logging
 import multiprocessing
 import os
@@ -466,6 +467,26 @@ def transform_iterable_dataset(
     )
 
 
+def prepend_state_dropout(data_config: _config.DataConfig, probability: float) -> _config.DataConfig:
+    dropout = _transforms.StateDropout(probability)
+    components = data_config.components if isinstance(data_config, _config.MixedDataConfig) else (data_config,)
+    components = tuple(
+        dataclasses.replace(
+            component,
+            model_transforms=dataclasses.replace(
+                component.model_transforms,
+                inputs=(dropout, *component.model_transforms.inputs),
+            ),
+        )
+        for component in components
+    )
+    return (
+        dataclasses.replace(data_config, components=components)
+        if isinstance(data_config, _config.MixedDataConfig)
+        else components[0]
+    )
+
+
 def create_data_loader(
     config: _config.TrainConfig,
     *,
@@ -488,6 +509,13 @@ def create_data_loader(
         return_host_batch: If true, each item also includes the transformed host batch before JAX sharding.
     """
     data_config = config.data.create(config.assets_dirs, config.model)
+
+    # Robot state dropout for training
+    if config.state_dropout_prob:
+        if framework != "jax" or config.model.model_type != _model.ModelType.PI05:
+            raise ValueError("state_dropout_prob is only supported for JAX pi0.5 training.")
+        data_config = prepend_state_dropout(data_config, config.state_dropout_prob)
+
     if isinstance(data_config, _config.MixedDataConfig):
         logging.info(
             "data_config: MixedDataConfig(components=%s, fast_local_loading=%s, asset_id=%s)",

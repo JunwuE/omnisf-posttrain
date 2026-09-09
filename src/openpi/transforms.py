@@ -113,6 +113,21 @@ class InjectDefaultPrompt(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class StateDropout(DataTransformFn):
+    probability: float
+
+    def __post_init__(self):
+        if not 0.0 <= self.probability <= 1.0:
+            raise ValueError("probability must be between 0 and 1.")
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "state" not in data:
+            raise ValueError("State is required for state dropout.")
+        data["state_mask"] = np.random.random() >= self.probability
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
 class Normalize(DataTransformFn):
     norm_stats: at.PyTree[NormStats] | None
     # If true, will use quantile normalization. Otherwise, normal z-score normalization will be used.
@@ -346,7 +361,10 @@ class TokenizePrompt(DataTransformFn):
             raise ValueError("Prompt is required")
 
         if self.discrete_state_input:
-            if (state := data.get("state", None)) is None:
+            state = data.get("state")
+            if not bool(data.pop("state_mask", True)):
+                state = None
+            elif state is None:
                 raise ValueError("State is required.")
         else:
             state = None
@@ -354,7 +372,9 @@ class TokenizePrompt(DataTransformFn):
         if not isinstance(prompt, str):
             prompt = prompt.item()
 
-        tokens, token_masks = self.tokenizer.tokenize(prompt, state)
+        tokens, token_masks = self.tokenizer.tokenize(
+            prompt, state, use_discrete_state_format=self.discrete_state_input
+        )
         return {**data, "tokenized_prompt": tokens, "tokenized_prompt_mask": token_masks}
 
 
