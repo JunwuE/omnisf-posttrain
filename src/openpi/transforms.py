@@ -283,7 +283,7 @@ class AbsoluteActions(DataTransformFn):
 
         if self.rotation_mask is not None:
             rotation_mask = np.asarray(self.rotation_mask)
-            state_rotvec = state[..., rotation_mask]
+            state_rotvec = state[..., :dims][..., rotation_mask]
             delta_rotvec = actions[..., :dims][..., rotation_mask]
             state_rotation = Rotation.from_rotvec(state_rotvec.reshape(-1, 3)).as_matrix()
             delta_rotation = Rotation.from_rotvec(delta_rotvec.reshape(-1, 3)).as_matrix()
