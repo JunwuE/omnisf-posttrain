@@ -1147,13 +1147,12 @@ class LeRobotRobocoinDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
-class LeRobotRobodojoDataConfig(DataConfigFactory):
+class LeRobotRobodojoSimDataConfig(DataConfigFactory):
     use_delta_actions: bool = True
     # use eef instead of joint as action and state representations.
     use_eef_action: bool = dataclasses.field(kw_only=True)
     # If true, represent EEF states and rotation actions as SO3 rotation vectors.
     use_so3_rpy: bool = False
-
     repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
         default=_transforms.Group(
             inputs=[
@@ -1181,8 +1180,72 @@ class LeRobotRobodojoDataConfig(DataConfigFactory):
             raise NotImplementedError("Joint action representation for Robodojo is not implemented.")
 
         data_transforms = _transforms.Group(
-            inputs=[robodojo_policy.RobodojoInputs()],
-            outputs=[robodojo_policy.RobodojoOutputs()],
+            inputs=[robodojo_policy.RobodojoSimInputs()],
+            outputs=[robodojo_policy.RobodojoSimOutputs()],
+        )
+        rpy_mask = _transforms.make_bool_mask(-3, 3, -1, -3, 3, -1)
+        if self.use_so3_rpy:
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.EulerToRotvec(rpy_mask)],
+                outputs=[_transforms.RotvecToEuler(rpy_mask)],
+            )
+        if self.use_delta_actions:
+            delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
+            so3_mask = rpy_mask if self.use_so3_rpy else None
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask, so3_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask, so3_mask)],
+            )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotRobodojoRealDataConfig(DataConfigFactory):
+    use_delta_actions: bool = True
+    # use eef instead of joint as action and state representations.
+    use_eef_action: bool = dataclasses.field(kw_only=True)
+    # If true, represent EEF states and rotation actions as SO3 rotation vectors.
+    use_so3_rpy: bool = False
+    # The common robot-frame origin is the midpoint between the parallel arm bases.
+    arm_base_distance: float = 0.600
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {
+                            "cam_high": "observation.images.cam_high",
+                            "cam_left_wrist": "observation.images.cam_left_wrist",
+                            "cam_right_wrist": "observation.images.cam_right_wrist",
+                        },
+                        "state": "observation.state",
+                        "actions": "action",
+                        "task_index": "task_index",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+    )
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        if not self.use_eef_action:
+            raise NotImplementedError("Joint action representation for Robodojo is not implemented.")
+
+        data_transforms = _transforms.Group(
+            inputs=[robodojo_policy.RobodojoRealInputs(arm_base_distance=self.arm_base_distance)],
+            outputs=[robodojo_policy.RobodojoRealOutputs(arm_base_distance=self.arm_base_distance)],
         )
         rpy_mask = _transforms.make_bool_mask(-3, 3, -1, -3, 3, -1)
         if self.use_so3_rpy:
