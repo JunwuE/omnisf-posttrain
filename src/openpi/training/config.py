@@ -538,7 +538,7 @@ class LeRobotRobotwinDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
-class LeRobotInterndataDataConfig(DataConfigFactory):
+class LeRobotInterndataSplitAlohaDataConfig(DataConfigFactory):
     # If true, will convert joint dimensions to deltas with respect to the current state before passing to the model.
     # Gripper dimensions will remain in absolute values.
     use_delta_joint_actions: bool = True
@@ -592,8 +592,20 @@ class LeRobotInterndataDataConfig(DataConfigFactory):
             raise ValueError("SO(3) rotation vectors require EEF actions to be enabled")
 
         data_transforms = _transforms.Group(
-            inputs=[interndata_policy.InterndataInputs(adapt_to_pi=self.adapt_to_pi, use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
-            outputs=[interndata_policy.InterndataOutputs(adapt_to_pi=self.adapt_to_pi, use_eef_action=self.use_eef_action, unified_gripper=self.unified_gripper)],
+            inputs=[
+                interndata_policy.InterndataSplitAlohaInputs(
+                    adapt_to_pi=self.adapt_to_pi,
+                    use_eef_action=self.use_eef_action,
+                    unified_gripper=self.unified_gripper,
+                )
+            ],
+            outputs=[
+                interndata_policy.InterndataSplitAlohaOutputs(
+                    adapt_to_pi=self.adapt_to_pi,
+                    use_eef_action=self.use_eef_action,
+                    unified_gripper=self.unified_gripper,
+                )
+            ],
         )
         rpy_mask = _transforms.make_bool_mask(-3, 3, -1, -3, 3, -1)
         if self.use_so3_rpy:
@@ -616,6 +628,135 @@ class LeRobotInterndataDataConfig(DataConfigFactory):
             repack_transforms=self.repack_transforms,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotInterndataLift2DataConfig(DataConfigFactory):
+    """Lift2 InterData config using robot-frame EEF poses."""
+
+    use_delta_joint_actions: bool = True
+    default_prompt: str | None = None
+    use_so3_rpy: bool = False
+    unified_gripper: bool = True
+
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {
+                            "cam_high": "images.rgb.head",
+                            "cam_left_wrist": "images.rgb.hand_left",
+                            "cam_right_wrist": "images.rgb.hand_right",
+                        },
+                        "state_left_eef": "states.left_ee_to_robot_pose",
+                        "state_left_gripper": "states.left_gripper.position",
+                        "state_right_eef": "states.right_ee_to_robot_pose",
+                        "state_right_gripper": "states.right_gripper.position",
+                        "actions_left_eef": "actions.left_ee_to_robot_pose",
+                        "actions_left_gripper": "actions.left_gripper.position",
+                        "actions_right_eef": "actions.right_ee_to_robot_pose",
+                        "actions_right_gripper": "actions.right_gripper.position",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+    )
+    action_sequence_keys: Sequence[str] = (
+        "actions.left_ee_to_robot_pose",
+        "actions.left_gripper.position",
+        "actions.right_ee_to_robot_pose",
+        "actions.right_gripper.position",
+    )
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[interndata_policy.InterndataLift2Inputs(unified_gripper=self.unified_gripper)],
+            outputs=[interndata_policy.InterndataLift2Outputs(unified_gripper=self.unified_gripper)],
+        )
+        rpy_mask = _transforms.make_bool_mask(-3, 3, -1, -3, 3, -1)
+        delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
+        if self.use_so3_rpy:
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.EulerToRotvec(rpy_mask)],
+                outputs=[_transforms.RotvecToEuler(rpy_mask)],
+            )
+        if self.use_delta_joint_actions:
+            so3_mask = rpy_mask if self.use_so3_rpy else None
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask, so3_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask, so3_mask)],
+            )
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=ModelTransformFactory(default_prompt=self.default_prompt)(model_config),
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotInterndataFrankaDataConfig(DataConfigFactory):
+    """Single-arm Franka InterData config using a robot-frame EEF pose."""
+
+    use_delta_joint_actions: bool = True
+    default_prompt: str | None = None
+    use_so3_rpy: bool = False
+    unified_gripper: bool = True
+
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {
+                            "cam_high": "images.rgb.head",
+                            "cam_hand": "images.rgb.hand",
+                        },
+                        "state_eef": "states.ee_to_robot_pose",
+                        "state_gripper": "states.gripper.position",
+                        "actions_eef": "actions.ee_to_robot_pose",
+                        "actions_gripper": "actions.gripper.position",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+    )
+    action_sequence_keys: Sequence[str] = (
+        "actions.ee_to_robot_pose",
+        "actions.gripper.position",
+    )
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[interndata_policy.InterndataFrankaInputs(unified_gripper=self.unified_gripper)],
+            outputs=[interndata_policy.InterndataFrankaOutputs(unified_gripper=self.unified_gripper)],
+        )
+        rpy_mask = _transforms.make_bool_mask(-3, 3, -1)
+        delta_action_mask = _transforms.make_bool_mask(6, -1)
+        if self.use_so3_rpy:
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.EulerToRotvec(rpy_mask)],
+                outputs=[_transforms.RotvecToEuler(rpy_mask)],
+            )
+        if self.use_delta_joint_actions:
+            so3_mask = rpy_mask if self.use_so3_rpy else None
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask, so3_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask, so3_mask)],
+            )
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=ModelTransformFactory(default_prompt=self.default_prompt)(model_config),
             action_sequence_keys=self.action_sequence_keys,
         )
 

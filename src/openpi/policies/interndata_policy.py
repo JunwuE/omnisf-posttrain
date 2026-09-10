@@ -7,6 +7,7 @@ from typing import ClassVar
 import einops
 import numpy as np
 import pinocchio as pin
+from scipy.spatial.transform import Rotation
 
 from openpi import transforms
 
@@ -17,9 +18,10 @@ _PIPER_LOCKED_JOINTS = ("joint7", "joint8")
 _PIPER_EE_JOINT = "joint6"
 _PIPER_EE_FRAME = "ee"
 _INTERNDATA_ARM_BASE_DISTANCE = 0.612
+_INTERNDATA_LIFT2_ARM_BASE_DISTANCE = 0.5
 
 
-def make_interndata_example() -> dict:
+def make_interndata_split_aloha_example() -> dict:
     """Creates a random input example for the Interndata policy."""
     return {
         "state": np.ones((14,)),
@@ -33,9 +35,21 @@ def make_interndata_example() -> dict:
     }
 
 
+def _parse_image(image: np.ndarray) -> np.ndarray:
+    image = np.asarray(image)
+    if np.issubdtype(image.dtype, np.floating):
+        image = (255 * image).astype(np.uint8)
+    if image.ndim == 3 and image.shape[0] in (1, 3) and image.shape[-1] not in (1, 3):
+        image = einops.rearrange(image, "c h w -> h w c")
+    return image
+
+
 @dataclasses.dataclass(frozen=True)
-class InterndataInputs(transforms.DataTransformFn):
+class InterndataSplitAlohaInputs(transforms.DataTransformFn):
     """Inputs for the Interndata policy.
+
+    When EEF actions are enabled, the frame origin is midway between the arm bases.
+    Its axes are +x forward, +y left, and +z up.
 
     Expected inputs:
     - images: dict[name, img] where img is [channel, height, width]. name must be in EXPECTED_CAMERAS.
@@ -62,31 +76,25 @@ class InterndataInputs(transforms.DataTransformFn):
         if set(in_images) - set(self.EXPECTED_CAMERAS):
             raise ValueError(f"Expected images to contain {self.EXPECTED_CAMERAS}, got {tuple(in_images)}")
 
-        # Assume that base image always exists.
-        base_image = in_images["cam_high"]
+        # Assume that the base image always exists.
+        base_image = _parse_image(in_images["cam_high"])
+        images = {"base_0_rgb": base_image}
+        image_masks = {"base_0_rgb": np.True_}
 
-        images = {
-            "base_0_rgb": base_image,
-        }
-        image_masks = {
-            "base_0_rgb": np.True_,
-        }
-
-        # Add the extra images.
-        extra_image_names = {
-            "left_wrist_0_rgb": "cam_left_wrist",
-            "right_wrist_0_rgb": "cam_right_wrist",
-        }
-        for dest, source in extra_image_names.items():
-            if source in in_images:
-                images[dest] = in_images[source]
-                image_masks[dest] = np.True_
+        # Add wrist images, replacing missing cameras with black images.
+        for output_key, input_key in (
+            ("left_wrist_0_rgb", "cam_left_wrist"),
+            ("right_wrist_0_rgb", "cam_right_wrist"),
+        ):
+            if input_key in in_images:
+                images[output_key] = _parse_image(in_images[input_key])
+                image_masks[output_key] = np.True_
             else:
-                images[dest] = np.zeros_like(base_image)
-                image_masks[dest] = np.False_
+                images[output_key] = np.zeros_like(base_image)
+                image_masks[output_key] = np.False_
 
         if self.unified_gripper:
-            data["state"][[6, 13]] = 10 * np.clip(data["state"][[6, 13]], 0.0, 0.1)     
+            data["state"][[6, 13]] = 10 * np.clip(data["state"][[6, 13]], 0.0, 0.1)
 
         inputs = {
             "image": images,
@@ -98,23 +106,23 @@ class InterndataInputs(transforms.DataTransformFn):
         if "actions_left_joint" in data:
             actions = np.concatenate(
                 [
-                    data['actions_left_joint'],
-                    data['actions_left_gripper'][..., None],
-                    data['actions_right_joint'],
-                    data['actions_right_gripper'][..., None],
+                    data["actions_left_joint"],
+                    data["actions_left_gripper"][..., None],
+                    data["actions_right_joint"],
+                    data["actions_right_gripper"][..., None],
                 ],
-                axis=-1
+                axis=-1,
             )
             actions = _encode_actions_inv(actions, adapt_to_pi=self.adapt_to_pi)
 
             if self.unified_gripper:
                 actions[:, [6, 13]] = 10 * np.clip(actions[:, [6, 13]], 0.0, 0.1)
-            
+
             inputs["actions"] = joint_actions_to_eef_actions(actions) if self.use_eef_action else actions
 
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]
-        
+
         if "index" in data:
             inputs["index"] = data["index"]
 
@@ -122,8 +130,8 @@ class InterndataInputs(transforms.DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
-class InterndataOutputs(transforms.DataTransformFn):
-    """Outputs for the Interndata policy."""
+class InterndataSplitAlohaOutputs(transforms.DataTransformFn):
+    """Outputs for the Interndata Split Aloha policy."""
 
     # If true, this will convert the joint and gripper values from the standard Aloha space to
     # the space used by the pi internal runtime which was used to train the base model.
@@ -139,6 +147,154 @@ class InterndataOutputs(transforms.DataTransformFn):
         if self.unified_gripper:
             actions[:, [6, 13]] = 0.1 * actions[:, [6, 13]]
         return {"actions": _encode_actions(actions, adapt_to_pi=self.adapt_to_pi)}
+
+
+@dataclasses.dataclass(frozen=True)
+class InterndataLift2Inputs(transforms.DataTransformFn):
+    """Inputs for lift2 data that already contains EEF robot poses.
+
+    Poses use a shared origin midway between the two arm bases. The axes match
+    Split Aloha (+x forward, +y left, +z up).
+    """
+
+    # Convert gripper values to a unified representation (0 = closed, 1 = open). Original values is (0 = closed, 0.1 = open).
+    unified_gripper: bool = True
+
+    def __call__(self, data: dict) -> dict:
+        in_images = data["images"]
+        base_image = _parse_image(in_images["cam_high"])
+        left_arm_offset = np.array(
+            [0.0, 0.5 * _INTERNDATA_LIFT2_ARM_BASE_DISTANCE, 0.0, 0.0, 0.0, 0.0, 0.0]
+        )
+        images = {"base_0_rgb": base_image}
+        image_masks = {"base_0_rgb": np.True_}
+        for output_key, input_key in (
+            ("left_wrist_0_rgb", "cam_left_wrist"),
+            ("right_wrist_0_rgb", "cam_right_wrist"),
+        ):
+            if input_key in in_images:
+                images[output_key] = _parse_image(in_images[input_key])
+                image_masks[output_key] = np.True_
+            else:
+                images[output_key] = np.zeros_like(base_image)
+                image_masks[output_key] = np.False_
+
+        inputs = {
+            "image": images,
+            "image_mask": image_masks,
+            "state": np.concatenate(
+                [
+                    _format_eef_arm(
+                        np.asarray(data["state_left_eef"]) + left_arm_offset,
+                        data["state_left_gripper"],
+                        unified_gripper=self.unified_gripper,
+                    ),
+                    _format_eef_arm(
+                        np.asarray(data["state_right_eef"]) - left_arm_offset,
+                        data["state_right_gripper"],
+                        unified_gripper=self.unified_gripper,
+                    ),
+                ],
+                axis=-1,
+            ),
+        }
+        if "actions_left_eef" in data:
+            inputs["actions"] = np.concatenate(
+                [
+                    _format_eef_arm(
+                        np.asarray(data["actions_left_eef"]) + left_arm_offset,
+                        data["actions_left_gripper"],
+                        unified_gripper=self.unified_gripper,
+                    ),
+                    _format_eef_arm(
+                        np.asarray(data["actions_right_eef"]) - left_arm_offset,
+                        data["actions_right_gripper"],
+                        unified_gripper=self.unified_gripper,
+                    ),
+                ],
+                axis=-1,
+            )
+
+        if "prompt" in data:
+            inputs["prompt"] = data["prompt"]
+
+        if "index" in data:
+            inputs["index"] = data["index"]
+
+        return inputs
+
+
+@dataclasses.dataclass(frozen=True)
+class InterndataLift2Outputs(transforms.DataTransformFn):
+    unified_gripper: bool = True
+
+    def __call__(self, data: dict) -> dict:
+        actions = np.asarray(data["actions"][:, :14]).copy()
+        actions[:, 1] -= 0.5 * _INTERNDATA_LIFT2_ARM_BASE_DISTANCE
+        actions[:, 8] += 0.5 * _INTERNDATA_LIFT2_ARM_BASE_DISTANCE
+        left = _eef_rpy_to_wxyz(actions[:, :6])
+        right = _eef_rpy_to_wxyz(actions[:, 7:13])
+        left_gripper = actions[:, 6:7]
+        right_gripper = actions[:, 13:14]
+        if self.unified_gripper:
+            left_gripper = 0.1 * np.clip(left_gripper, 0.0, 1.0)
+            right_gripper = 0.1 * np.clip(right_gripper, 0.0, 1.0)
+        return {"actions": np.concatenate([left, left_gripper, right, right_gripper], axis=-1)}
+
+
+@dataclasses.dataclass(frozen=True)
+class InterndataFrankaInputs(transforms.DataTransformFn):
+    """Inputs for single-arm Franka data that already contains an EEF pose."""
+
+    # Convert gripper values to a unified representation (0 = closed, 1 = open). Original values is (0 = closed, 0.1 = open).
+    unified_gripper: bool = True
+
+    def __call__(self, data: dict) -> dict:
+        base_image = _parse_image(data["images"]["cam_high"])
+        hand_image = _parse_image(data["images"]["cam_hand"])
+        inputs = {
+            "image": {
+                "base_0_rgb": base_image,
+                "left_wrist_0_rgb": hand_image,
+                "right_wrist_0_rgb": np.zeros_like(hand_image),
+            },
+            "image_mask": {
+                "base_0_rgb": np.True_,
+                "left_wrist_0_rgb": np.True_,
+                "right_wrist_0_rgb": np.False_,
+            },
+            "state": _format_eef_arm(
+                data["state_eef"],
+                data["state_gripper"],
+                unified_gripper=self.unified_gripper,
+            ),
+        }
+        if "actions_eef" in data:
+            inputs["actions"] = _format_eef_arm(
+                data["actions_eef"],
+                data["actions_gripper"],
+                unified_gripper=self.unified_gripper,
+            )
+        if "prompt" in data:
+            inputs["prompt"] = data["prompt"]
+
+        if "index" in data:
+            inputs["index"] = data["index"]
+
+        return inputs
+
+
+@dataclasses.dataclass(frozen=True)
+class InterndataFrankaOutputs(transforms.DataTransformFn):
+    unified_gripper: bool = True
+
+    def __call__(self, data: dict) -> dict:
+        actions = np.asarray(data["actions"][:, :7])
+        pose = _eef_rpy_to_wxyz(actions[:, :6])
+        gripper = actions[:, 6:7]
+        if self.unified_gripper:
+            gripper = 0.1 * np.clip(gripper, 0.0, 1.0)
+        return {"actions": np.concatenate([pose, gripper], axis=-1)}
 
 
 def _joint_flip_mask() -> np.ndarray:
@@ -201,28 +357,14 @@ def _decode_aloha(data: dict, *, adapt_to_pi: bool = False) -> dict:
     # dim sizes: [6, 1, 6, 1]
     state = np.concatenate(
         [
-            data['state_left_joint'],
-            data['state_left_gripper'][None],
-            data['state_right_joint'],
-            data['state_right_gripper'][None],
+            data["state_left_joint"],
+            data["state_left_gripper"][None],
+            data["state_right_joint"],
+            data["state_right_gripper"][None],
         ],
-        axis=-1
+        axis=-1,
     )
-    state = _decode_state(state, adapt_to_pi=adapt_to_pi)
-
-    def convert_image(img):
-        img = np.asarray(img)
-        # Convert to uint8 if using float images.
-        if np.issubdtype(img.dtype, np.floating):
-            img = (255 * img).astype(np.uint8)
-        # Convert from [channel, height, width] to [height, width, channel].
-        return einops.rearrange(img, "c h w -> h w c")
-
-    images = data["images"]
-    images_dict = {name: convert_image(img) for name, img in images.items()}
-
-    data["images"] = images_dict
-    data["state"] = state
+    data["state"] = _decode_state(state, adapt_to_pi=adapt_to_pi)
     return data
 
 
@@ -340,3 +482,30 @@ def joint_state_to_eef_state(state: np.ndarray) -> np.ndarray:
 
 def joint_actions_to_eef_actions(actions: np.ndarray) -> np.ndarray:
     return np.stack([joint_state_to_eef_state(action) for action in actions], axis=0)
+
+
+def _eef_rpy_to_wxyz(pose: np.ndarray) -> np.ndarray:
+    """Convert model pose [xyz, rpy] to robot-pose [xyz, quaternion(wxyz)]."""
+    pose = np.asarray(pose)
+    if pose.shape[-1] != 6:
+        raise ValueError(f"Expected EEF pose with 6 values, got {pose.shape}")
+    quat_xyzw = Rotation.from_euler("xyz", pose[..., 3:6].reshape(-1, 3)).as_quat()
+    quat_wxyz = quat_xyzw[..., [3, 0, 1, 2]].reshape((*pose.shape[:-1], 4))
+    return np.concatenate([pose[..., :3], quat_wxyz], axis=-1)
+
+
+def _format_eef_arm(pose: np.ndarray, gripper: np.ndarray, *, unified_gripper: bool) -> np.ndarray:
+    pose = np.asarray(pose)
+    if pose.shape[-1] != 7:
+        raise ValueError(f"Expected EEF pose with 7 values, got {pose.shape}")
+
+    # Dataset poses use [xyz, quaternion(wxyz)]; SciPy expects xyzw.
+    quat_xyzw = pose[..., 3:7][..., [1, 2, 3, 0]]
+    rpy = Rotation.from_quat(quat_xyzw.reshape(-1, 4)).as_euler("xyz").reshape((*pose.shape[:-1], 3))
+
+    gripper = np.asarray(gripper)
+    if unified_gripper:
+        gripper = 10.0 * np.clip(gripper, 0.0, 0.1)
+    if gripper.ndim and gripper.shape[-1] == 1:
+        gripper = gripper[..., 0]
+    return np.concatenate([pose[..., :3], rpy, gripper[..., None]], axis=-1)
