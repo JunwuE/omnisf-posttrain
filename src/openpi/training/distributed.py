@@ -30,9 +30,12 @@ class DistributedInfo:
 _INITIALIZED = False
 
 
-def _env_int(name: str, default: int) -> int:
-    value = os.environ.get(name)
-    return int(value) if value else default
+def _env_int(names: tuple[str, ...], default: int) -> int:
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return int(value)
+    return default
 
 
 def _local_device_id(local_process_index: int) -> int:
@@ -43,10 +46,12 @@ def _local_device_id(local_process_index: int) -> int:
 
 
 def _distributed_info_from_env() -> DistributedInfo:
-    process_count = _env_int("JAX_PROCESS_COUNT", _env_int("SLURM_NTASKS", 1))
-    process_index = _env_int("JAX_PROCESS_INDEX", _env_int("SLURM_PROCID", 0))
-    local_process_index = _env_int("JAX_LOCAL_PROCESS_INDEX", _env_int("SLURM_LOCALID", 0))
-    node_count = _env_int("SLURM_JOB_NUM_NODES", 1)
+    process_count = _env_int(("JAX_PROCESS_COUNT", "WORLD_SIZE", "SLURM_NTASKS"), 1)
+    process_index = _env_int(("JAX_PROCESS_INDEX", "RANK", "SLURM_PROCID"), 0)
+    local_process_index = _env_int(("JAX_LOCAL_PROCESS_INDEX", "LOCAL_RANK", "SLURM_LOCALID"), 0)
+    local_process_count = _env_int(("JAX_LOCAL_PROCESS_COUNT", "LOCAL_WORLD_SIZE", "SLURM_NTASKS_PER_NODE"), 1)
+    default_node_count = max(1, process_count // local_process_count)
+    node_count = _env_int(("JAX_NODE_COUNT", "SLURM_JOB_NUM_NODES", "PET_NNODES", "NNODES"), default_node_count)
     master_addr = os.environ.get("JAX_COORDINATOR_ADDR", os.environ.get("MASTER_ADDR"))
     master_port = os.environ.get("JAX_COORDINATOR_PORT", os.environ.get("MASTER_PORT"))
     coordinator_address = f"{master_addr}:{master_port}" if master_addr and master_port else None

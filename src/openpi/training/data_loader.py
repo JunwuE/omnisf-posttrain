@@ -1,5 +1,7 @@
 from collections.abc import Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 import dataclasses
+import functools
 import logging
 import multiprocessing
 import os
@@ -63,6 +65,11 @@ class TransformedDataset(Dataset[T_co]):
 
     def __getitem__(self, index: SupportsIndex) -> T_co:
         return self._transform(self._dataset[index])
+
+    def __getitems__(self, indices: Sequence[SupportsIndex]) -> list[T_co]:
+        getitems = getattr(self._dataset, "__getitems__", None)
+        samples = getitems(indices) if getitems is not None else [self._dataset[index] for index in indices]
+        return [self._transform(sample) for sample in samples]
 
     def __len__(self) -> int:
         return len(self._dataset)
@@ -167,6 +174,91 @@ class _FastLocalLeRobotDataset(lerobot_dataset.LeRobotDataset):
         self.episode_data_index = lerobot_dataset.get_episode_data_index(self.meta.episodes, self.episodes)
         lerobot_dataset.check_delta_timestamps(self.delta_timestamps, self.fps, self.tolerance_s)
         self.delta_indices = lerobot_dataset.get_delta_indices(self.delta_timestamps, self.fps)
+        self._query_datasets = {
+            key: self.hf_dataset.with_format("torch", columns=[key])
+            for key in self.delta_indices
+            if key not in self.meta.video_keys
+        }
+
+    def _decode_video_frames(self, video_key: str, requested_timestamps: list[float], ep_idx: int) -> torch.Tensor:
+        video_path = self.root / self.meta.get_video_file_path(ep_idx, video_key)
+        if self.video_backend != "torchcodec":
+            return lerobot_dataset.decode_video_frames(
+                video_path, requested_timestamps, self.tolerance_s, self.video_backend
+            )
+
+        from torchcodec.decoders import VideoDecoder  # noqa: PLC0415 - optional backend
+
+        decoder = VideoDecoder(video_path, device="cpu", seek_mode="approximate")
+        average_fps = decoder.metadata.average_fps
+        frame_indices = [round(timestamp * average_fps) for timestamp in requested_timestamps]
+        clamped_indices = [min(max(index, 0), len(decoder) - 1) for index in frame_indices]
+        if clamped_indices != frame_indices:
+            logging.warning("Clamped video frame indices: video=%s", video_path)
+        frame_batch = decoder.get_frames_at(indices=clamped_indices)
+        # Preserve dataset compatibility: clamp boundary frames and validate frame-grid times,
+        # not the original requests, which may contain timestamp offsets.
+        query = torch.tensor([index / average_fps for index in clamped_indices], dtype=torch.float32)
+        distances = (query - frame_batch.pts_seconds.to(dtype=torch.float32, device="cpu")).abs()
+        if not bool((distances < self.tolerance_s).all()):
+            raise AssertionError(
+                f"Video timestamps violate tolerance {self.tolerance_s}: "
+                f"distance={distances.tolist()} video={video_path}"
+            )
+        return frame_batch.data.to(dtype=torch.float32) / 255
+
+    def _query_videos(self, query_timestamps: dict[str, list[float]], ep_idx: int) -> dict[str, torch.Tensor]:
+        return {
+            video_key: self._decode_video_frames(video_key, requested_timestamps, ep_idx).squeeze(0)
+            for video_key, requested_timestamps in query_timestamps.items()
+        }
+
+    def __getitems__(self, indices: Sequence[SupportsIndex]) -> list[dict]:
+        if not indices:
+            return []
+        items = []
+        item_query_indices: list[dict[str, list[int | bool]]] = []
+        grouped: dict[tuple[int, str], list[tuple[int, list[float]]]] = {}
+        for item_index, index in enumerate(indices):
+            index_value = index.__index__()
+            item = self.hf_dataset[index_value]
+            ep_idx = item["episode_index"].item()
+            query_indices = {}
+            if self.delta_indices is not None:
+                query_indices, padding = self._get_query_indices(index_value, ep_idx)
+                item = {**item, **padding}
+            query_timestamps = (
+                self._get_query_timestamps(item["timestamp"].item(), query_indices) if self.meta.video_keys else {}
+            )
+            items.append(item)
+            item_query_indices.append(query_indices)
+            for video_key, timestamps in query_timestamps.items():
+                grouped.setdefault((ep_idx, video_key), []).append((item_index, timestamps))
+
+        for key, query_dataset in self._query_datasets.items():
+            flat_indices = [index for query in item_query_indices for index in query[key]]
+            values = query_dataset[flat_indices][key]
+            offset = 0
+            for item, query in zip(items, item_query_indices, strict=True):
+                stop = offset + len(query[key])
+                item[key] = values[offset:stop]
+                offset = stop
+
+        for (ep_idx, video_key), requests in grouped.items():
+            timestamps = [timestamp for _, requested in requests for timestamp in requested]
+            frames = self._decode_video_frames(video_key, timestamps, ep_idx)
+            offset = 0
+            for item_index, requested in requests:
+                stop = offset + len(requested)
+                items[item_index][video_key] = frames[offset:stop].squeeze(0)
+                offset = stop
+
+        for item in items:
+            if self.image_transforms is not None:
+                for camera_key in self.meta.camera_keys:
+                    item[camera_key] = self.image_transforms(item[camera_key])
+            item["task"] = self.meta.tasks[item["task_index"].item()]
+        return items
 
 
 class WeightedMixedDataset(Dataset):
@@ -185,6 +277,11 @@ class WeightedMixedDataset(Dataset):
         self._length = int(dataset_lengths.sum())
         self._seed = seed
         self._epoch = 0
+        self._read_chunk_size = int(os.environ.get("OPENPI_MIXED_READ_CHUNK_SIZE", "1"))
+        if self._read_chunk_size < 1:
+            raise ValueError("OPENPI_MIXED_READ_CHUNK_SIZE must be positive.")
+        self._read_threads = 0
+        self._executor: ThreadPoolExecutor | None = None
 
     def set_epoch(self, epoch: int) -> None:
         self._epoch = epoch
@@ -194,11 +291,51 @@ class WeightedMixedDataset(Dataset):
         if index_value < 0:
             index_value %= self._length
 
-        # TODO: more efficient and fair sampling
-        rng = np.random.default_rng(np.random.SeedSequence([self._seed, self._epoch, index_value]))
-        dataset_index = int(rng.choice(len(self._datasets), p=self._weights))
-        sample_index = int(rng.integers(len(self._datasets[dataset_index])))
+        dataset_index, sample_index = self._sample_location(index_value)
         return self._datasets[dataset_index][sample_index]
+
+    def _sample_location(self, index: int) -> tuple[int, int]:
+        rng = np.random.default_rng(np.random.SeedSequence([self._seed, self._epoch, index]))
+        dataset_index = int(rng.choice(len(self._datasets), p=self._weights))
+        return dataset_index, int(rng.integers(len(self._datasets[dataset_index])))
+
+    def __getitems__(self, indices: Sequence[SupportsIndex]) -> list[dict]:
+        if not indices:
+            return []
+
+        chunks: list[tuple[int, tuple[int, ...]]] = []
+        for chunk_start in range(0, len(indices), self._read_chunk_size):
+            chunk = indices[chunk_start : chunk_start + self._read_chunk_size]
+            component_index, start = self._sample_location(chunk[0].__index__())
+            dataset = self._datasets[component_index]
+            sample_indices = tuple((start + offset) % len(dataset) for offset in range(len(chunk)))
+            chunks.append((component_index, sample_indices))
+
+        def load_chunk(chunk: tuple[int, tuple[int, ...]]) -> list[dict]:
+            component_index, sample_indices = chunk
+            dataset = self._datasets[component_index]
+            getitems = getattr(dataset, "__getitems__", None)
+            return getitems(sample_indices) if getitems is not None else [dataset[index] for index in sample_indices]
+
+        if self._read_threads <= 1 or len(chunks) == 1:
+            results = [load_chunk(chunk) for chunk in chunks]
+        else:
+            if self._executor is None:
+                self._executor = ThreadPoolExecutor(max_workers=self._read_threads, thread_name_prefix="mixed-data")
+            results = list(self._executor.map(load_chunk, chunks))
+        return [item for chunk_items in results for item in chunk_items]
+
+    def set_read_threads(self, count: int) -> None:
+        if count < 0:
+            raise ValueError(f"Read thread count must be non-negative, got {count}.")
+        if count != self._read_threads:
+            self.close()
+            self._read_threads = count
+
+    def close(self) -> None:
+        if self._executor is not None:
+            self._executor.shutdown()
+            self._executor = None
 
     def __len__(self) -> int:
         return self._length
@@ -746,8 +883,18 @@ class TorchDataLoader:
         self._prefetch_depth = prefetch_depth
         self._return_host_batch = return_host_batch
 
+        process_workers = num_workers
+        if isinstance(dataset, WeightedMixedDataset):
+            dataset.set_read_threads(num_workers)
+            process_workers = 0
+            logging.info(
+                "Mixed batch loading: read_threads=%s, read_chunk_size=%s, batched_video_decode=True",
+                num_workers,
+                dataset._read_chunk_size,  # noqa: SLF001
+            )
+
         mp_context = None
-        if num_workers > 0:
+        if process_workers > 0:
             mp_context = multiprocessing.get_context("spawn")
 
         generator = torch.Generator()
@@ -757,10 +904,10 @@ class TorchDataLoader:
             batch_size=local_batch_size,
             shuffle=(sampler is None and shuffle),  # Don't shuffle if using sampler
             sampler=sampler,
-            num_workers=num_workers,
+            num_workers=process_workers,
             multiprocessing_context=mp_context,
-            persistent_workers=num_workers > 0,
-            collate_fn=_collate_fn,
+            persistent_workers=process_workers > 0,
+            collate_fn=functools.partial(_collate_fn, drop_index=isinstance(dataset, WeightedMixedDataset)),
             worker_init_fn=_worker_init_fn,
             drop_last=True,
             generator=generator,
@@ -772,30 +919,34 @@ class TorchDataLoader:
 
     def _yield_batches(self):
         num_items = 0
-        while True:
-            if self._sampler is not None and hasattr(self._sampler, "set_epoch"):
-                self._sampler.set_epoch(self._epoch)
-            if hasattr(self._dataset, "set_epoch"):
-                self._dataset.set_epoch(self._epoch)
-            self._epoch += 1
-            data_iter = iter(self._data_loader)
+        try:
             while True:
-                if self._num_batches is not None and num_items >= self._num_batches:
-                    return
-                try:
-                    batch = next(data_iter)
-                except StopIteration:
-                    break  # We've exhausted the dataset. Create a new iterator and start over.
-                num_items += 1
-                # For JAX, convert to sharded arrays; for PyTorch, return torch tensors
-                if self._sharding is not None:
-                    sharded_batch = jax.tree.map(
-                        lambda x: jax.make_array_from_process_local_data(self._sharding, x), batch
-                    )
-                    yield (sharded_batch, batch) if self._return_host_batch else sharded_batch
-                else:
-                    torch_batch = jax.tree.map(torch.as_tensor, batch)
-                    yield (torch_batch, batch) if self._return_host_batch else torch_batch
+                if self._sampler is not None and hasattr(self._sampler, "set_epoch"):
+                    self._sampler.set_epoch(self._epoch)
+                if hasattr(self._dataset, "set_epoch"):
+                    self._dataset.set_epoch(self._epoch)
+                self._epoch += 1
+                data_iter = iter(self._data_loader)
+                while True:
+                    if self._num_batches is not None and num_items >= self._num_batches:
+                        return
+                    try:
+                        batch = next(data_iter)
+                    except StopIteration:
+                        break  # We've exhausted the dataset. Create a new iterator and start over.
+                    num_items += 1
+                    # For JAX, convert to sharded arrays; for PyTorch, return torch tensors
+                    if self._sharding is not None:
+                        sharded_batch = jax.tree.map(
+                            lambda x: jax.make_array_from_process_local_data(self._sharding, x), batch
+                        )
+                        yield (sharded_batch, batch) if self._return_host_batch else sharded_batch
+                    else:
+                        torch_batch = jax.tree.map(torch.as_tensor, batch)
+                        yield (torch_batch, batch) if self._return_host_batch else torch_batch
+        finally:
+            if isinstance(self._dataset, WeightedMixedDataset):
+                self._dataset.close()
 
     def __iter__(self):
         iterator = self._yield_batches()
@@ -809,8 +960,10 @@ class TorchDataLoader:
         yield from iterator
 
 
-def _collate_fn(items):
-    """Collate the batch elements into batched numpy arrays."""
+def _collate_fn(items, *, drop_index: bool = False):
+    """Collate samples, optionally dropping inconsistent mixed-source indices."""
+    if drop_index:
+        items = [{key: value for key, value in item.items() if key != "index"} for item in items]
     # Make sure to convert to numpy arrays before stacking since some of the incoming elements
     # may be JAX arrays.
     return jax.tree.map(lambda *xs: np.stack([np.asarray(x) for x in xs], axis=0), *items)
