@@ -46,6 +46,28 @@ def _local_device_id(local_process_index: int) -> int:
 
 
 def _distributed_info_from_env() -> DistributedInfo:
+    # Web platforms may set WORLD_SIZE/RANK for the job rather than its workers.
+    # Only trust that layout inside a worker launcher or with explicit JAX config.
+    launched = (
+        bool(os.environ.get("JAX_PROCESS_COUNT"))
+        or all(os.environ.get(name) for name in ("TORCHELASTIC_RUN_ID", "LOCAL_RANK", "LOCAL_WORLD_SIZE"))
+        or bool(os.environ.get("SLURM_PROCID"))
+    )
+    if not launched:
+        if _env_int(("WORLD_SIZE", "SLURM_NTASKS"), 1) > 1:
+            logging.info(
+                "No distributed worker launcher detected; using all local visible devices in one process. "
+                "For distributed training, use torchrun/srun or explicitly set JAX_PROCESS_COUNT."
+            )
+        return DistributedInfo(
+            process_count=1,
+            process_index=0,
+            local_process_index=0,
+            node_count=1,
+            coordinator_address=None,
+            local_device_ids=(),
+        )
+
     process_count = _env_int(("JAX_PROCESS_COUNT", "WORLD_SIZE", "SLURM_NTASKS"), 1)
     process_index = _env_int(("JAX_PROCESS_INDEX", "RANK", "SLURM_PROCID"), 0)
     local_process_index = _env_int(("JAX_LOCAL_PROCESS_INDEX", "LOCAL_RANK", "SLURM_LOCALID"), 0)
