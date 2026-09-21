@@ -2416,31 +2416,39 @@ _CONFIGS = [
 ]
 
 
+def is_local_repo_pattern(repo_id: str) -> bool:
+    return repo_id.startswith(("/", "./", "../", "~")) and glob.has_magic(repo_id)
+
+
+def expand_local_repo_ids(repo_id: str) -> Sequence[str]:
+    """Expand local patterns into sorted LeRobot directories; leave other IDs unchanged."""
+    if not is_local_repo_pattern(repo_id):
+        return (repo_id,)
+
+    expanded_pattern = str(pathlib.Path(repo_id).expanduser())
+    matches = sorted(pathlib.Path(match) for match in glob.glob(expanded_pattern))
+    dataset_dirs = [path for path in matches if path.is_dir() and (path / "meta").is_dir()]  # LerobotDataset format
+    if not dataset_dirs:
+        raise ValueError(f"Pattern '{repo_id}' did not match any valid LeRobot dataset directories.")
+    return tuple(str(path) for path in dataset_dirs)
+
+
 def glob_mixed_data_source(source: MixedDataSourceConfig) -> Sequence[MixedDataSourceConfig]:
     """
     repo_id can be wildcard, like ./data/intern/data/*
     Expanded datasets inherit the parent source weight; the mixed sampler combines
     that weight with each dataset's sample count.
     """
-    repo_id = source.data_factory.repo_id
-    if not repo_id.startswith(("/", "./", "../", "~")) or not glob.has_magic(repo_id):
+    if not is_local_repo_pattern(source.data_factory.repo_id):
         return (source,)
-
-    expanded_pattern = str(pathlib.Path(repo_id).expanduser())
-    matches = sorted(pathlib.Path(match) for match in glob.glob(expanded_pattern))
-    dataset_dirs = [path for path in matches if path.is_dir() and (path / "meta").is_dir()]  # LerobotDataset format
-    if not dataset_dirs:
-        raise ValueError(
-            f"Mixed data source '{source.name}' pattern '{repo_id}' did not match any valid LeRobot dataset directories."
-        )
 
     return tuple(
         dataclasses.replace(
             source,
-            name=f"{source.name}:{dataset_dir.name}",
-            data_factory=dataclasses.replace(source.data_factory, repo_id=str(dataset_dir)),
+            name=f"{source.name}:{pathlib.Path(repo_id).name}",
+            data_factory=dataclasses.replace(source.data_factory, repo_id=repo_id),
         )
-        for dataset_dir in dataset_dirs
+        for repo_id in expand_local_repo_ids(source.data_factory.repo_id)
     )
 
 

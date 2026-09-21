@@ -364,8 +364,16 @@ def _try_create_stats_only_torch_dataset(
     data_config: _config.DataConfig,
     action_horizon: int,
     model_config: _model.BaseModelConfig,
+    *,
+    dataset: _data_loader.Dataset | None = None,
 ) -> _data_loader.Dataset:
-    dataset = _data_loader.create_torch_dataset(data_config, action_horizon, model_config)
+    if dataset is None:
+        dataset = _data_loader.create_torch_dataset(data_config, action_horizon, model_config)
+    if isinstance(dataset, torch.utils.data.ConcatDataset):
+        return torch.utils.data.ConcatDataset(
+            _try_create_stats_only_torch_dataset(data_config, action_horizon, model_config, dataset=component)
+            for component in dataset.datasets
+        )
 
     if lerobot_dataset is None:
         base_dataset = None

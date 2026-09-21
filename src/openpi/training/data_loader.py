@@ -419,6 +419,24 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
+    datasets = [
+        _create_single_lerobot_dataset(
+            dataclasses.replace(data_config, repo_id=expanded_repo_id),
+            action_horizon,
+            fast_local_loading=fast_local_loading,
+        )
+        for expanded_repo_id in _config.expand_local_repo_ids(repo_id)
+    ]
+    return datasets[0] if len(datasets) == 1 else torch.utils.data.ConcatDataset(datasets)
+
+
+def _create_single_lerobot_dataset(
+    data_config: _config.DataConfig,
+    action_horizon: int,
+    *,
+    fast_local_loading: bool,
+) -> Dataset:
+    repo_id = data_config.repo_id
     if fast_local_loading:
         root = pathlib.Path(repo_id).expanduser().resolve()
         info = lerobot_dataset.load_info(root)
