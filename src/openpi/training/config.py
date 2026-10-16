@@ -25,6 +25,7 @@ import openpi.policies.droid_policy as droid_policy
 import openpi.policies.droid_dreamzero_policy as droid_dreamzero_policy
 import openpi.policies.molmoact_policy as molmoact_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.franka_hkust as franka_hkust
 import openpi.policies.liberoplus_policy as liberoplus_policy
 import openpi.policies.agilex_policy as agilex_policy
 import openpi.policies.robotwin_policy as robotwin_policy
@@ -877,6 +878,53 @@ class LeRobotLiberoPlusDataConfig(DataConfigFactory):
         data_transforms = _transforms.Group(
             inputs=[liberoplus_policy.LiberoPlusInputs(unified_gripper=self.unified_gripper)],
             outputs=[liberoplus_policy.LiberoPlusOutputs(unified_gripper=self.unified_gripper)],
+        )
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=ModelTransformFactory()(model_config),
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotFrankaHKUSTDataConfig(DataConfigFactory):
+    """Uses recorded EEF states as pose targets and the original gripper action labels."""
+
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "observation.images.exterior_image",
+                        "observation/wrist_image": "observation.images.wrist_image",
+                        "observation/state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                        "index": "index",
+                    }
+                )
+            ]
+        )
+    )
+    action_sequence_keys: Sequence[str] = ("observation.state", "action")
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        delta_action_mask = _transforms.make_bool_mask(6, -1)
+        rotation_mask = _transforms.make_bool_mask(-3, 3, -1)
+        data_transforms = _transforms.Group(
+            inputs=[franka_hkust.FrankaHkustInputs()],
+            outputs=[franka_hkust.FrankaHkustOutputs()],
+        ).push(
+            # Interpret rx/ry/rz as xyz Euler angles in radians; use rotvecs inside the model.
+            inputs=[_transforms.EulerToRotvec(rotation_mask)],
+            outputs=[_transforms.RotvecToEuler(rotation_mask)],
+        ).push(
+            # Use SO(3) deltas during training and restore absolute EEF targets at inference.
+            inputs=[_transforms.DeltaActions(delta_action_mask, rotation_mask)],
+            outputs=[_transforms.AbsoluteActions(delta_action_mask, rotation_mask)],
         )
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
