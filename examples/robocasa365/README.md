@@ -101,6 +101,22 @@ python scripts/compute_norm_stats.py \
 
 ## 3. 使用现有空间对齐训练入口
 
+下载作者提供的 OmniSF JAX checkpoint 和组件权重：
+
+```bash
+python -m pip install modelscope==1.40.2 modelscope-hub==0.4.6
+python examples/robocasa365/download_pretrained_weights.py \
+  --model-root /path/to/shared/robot-model --prompt-token
+```
+
+在不回显的提示中输入 ModelScope token，也可通过 `MODELSCOPE_API_TOKEN` 环境变量传入。
+脚本从 dataset `haofuly/omnisf` 仅下载 `omnisf_9.0_jax_35999/*`，
+从 model `haofuly/omnisf-Components-ckpts` 下载完整组件仓库，各使用 32 个下载线程。
+输出分别位于 `<model-root>/omnisf` 和 `<model-root>/omnisf-Components-ckpts`。
+文件大小、可用的远端 SHA256 和下载状态记录在 `<model-root>/.downloads/`；token 不写入文件。
+失败后重跑同一命令可重试。代理无法访问时，可用 `--direct` 仅对此进程禁用代理，
+或用 `--endpoint https://www.modelscope.ai` 选择官方国际站点。
+
 先设置真实的预训练权重路径：
 
 ```bash
