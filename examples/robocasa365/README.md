@@ -241,7 +241,24 @@ sbatch --partition=你的GPU分区 slurm_scripts/train_robocasa365_8gpu.sbatch -
 保持有效 batch 为 256；若是 VGGT 特征提取显存不足，可减小 `--align-feature-batch-size`。
 这些参数可追加在 sbatch 脚本名后覆盖默认值。切换数据子集时设置 `CONFIG` 并准备对应统计。
 
-## 5. 推理
+## 5. Atomic：本机 4 卡，不使用 Slurm
+
+设置前面相同的数据、norm、JAX 权重、OmniVGGT 权重和 checkpoint 路径后运行：
+
+```bash
+# 当可见 GPU 多于 4 张时，指定本次使用的四张卡。
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+bash scripts/train_robocasa365_4gpu.sh
+```
+
+脚本复用 `train_align.py`，运行 60,000 个优化器更新。
+沿用 8 卡方案每卡 32 个样本的设置，4 卡采用 micro batch 128、梯度累积 2，
+有效全局 batch 仍为 256。VGGT 特征提取在同四张卡上分块运行。
+启动前检查数据、norm、权重和可见 GPU 数量。
+`bash scripts/train_robocasa365_4gpu.sh --dry-run` 可预览命令；
+恢复同一个实验使用 `bash scripts/train_robocasa365_4gpu.sh --resume`。
+
+## 6. 推理
 
 ```bash
 python scripts/serve_policy.py policy:checkpoint \
@@ -254,7 +271,7 @@ python scripts/serve_policy.py policy:checkpoint \
 图像支持 uint8 HWC 或 LeRobot 风格的 float CHW [0, 1]。
 服务端沿用 checkpoint 内保存的统计，输出 `(action_horizon, 12)` 原始控制动作。
 
-## 6. 回归测试
+## 7. 回归测试
 
 ```bash
 JAX_PLATFORMS=cpu python -m pytest -q \
@@ -265,20 +282,3 @@ JAX_PLATFORMS=cpu python -m pytest -q \
 测试生成小型 LeRobot v2.1 Parquet 和 H.264 视频，覆盖完整动作、三相机、
 单集／混合统计、普通／快速读取、JAX batch、归一化逆变换及版本不匹配。
 测试中的 tokenizer 使用离线替身，不加载真实 π0.5 / VGGT 权重。
-
-## 5. Atomic：本机 4 卡，不使用 Slurm
-
-设置前面相同的数据、norm、JAX 权重、OmniVGGT 权重和 checkpoint 路径后运行：
-
-```bash
-# 当可见 GPU 多于 4 张时，指定本次使用的四张卡。
-export CUDA_VISIBLE_DEVICES=0,1,2,3
-bash scripts/train_robocasa365_4gpu.sh
-```
-
-脚本复用 `train_align.py`，运行 60,000 个优化器更新。
-为保持 8 卡方案每卡 32 个样本的显存规模，4 卡采用 micro batch 128、梯度累积 2，
-有效全局 batch 仍为 256。VGGT 特征提取在同四张卡上分块运行。
-启动前检查数据、norm、权重和可见 GPU 数量。
-`bash scripts/train_robocasa365_4gpu.sh --dry-run` 可预览命令；
-恢复同一个实验使用 `bash scripts/train_robocasa365_4gpu.sh --resume`。

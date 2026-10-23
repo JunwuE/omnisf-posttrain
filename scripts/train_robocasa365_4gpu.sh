@@ -4,7 +4,7 @@
 set -euo pipefail
 
 PROJECT_ROOT=${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
-CONFIG=${CONFIG:-robocasa365_target_atomic}
+CONFIG=robocasa365_target_atomic
 EXP_NAME=${EXP_NAME:-robocasa365_target_atomic_60k_bs256_4gpu}
 CONDA_BASE=${CONDA_BASE:-$HOME/miniconda3}
 CONDA_ENV=${CONDA_ENV:-omnisf}
