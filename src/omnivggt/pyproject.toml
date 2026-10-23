@@ -34,7 +34,7 @@ build-backend = "setuptools.build_meta"
 
 # setuptools configuration
 [tool.setuptools.packages.find]
-where = ["."]
+where = [".."]
 include = ["omnivggt*"]
 
 # Pixi configuration

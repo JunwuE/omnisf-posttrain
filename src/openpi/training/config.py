@@ -30,6 +30,7 @@ import openpi.policies.liberoplus_policy as liberoplus_policy
 import openpi.policies.agilex_policy as agilex_policy
 import openpi.policies.robotwin_policy as robotwin_policy
 import openpi.policies.robocasa_no_movement_policy as robocasa_no_movement_policy
+import openpi.policies.robocasa365_policy as robocasa365_policy
 import openpi.policies.interndata_policy as interndata_policy
 import openpi.policies.robocoin_policy as robocoin_policy
 import openpi.policies.robodojo_policy as robodojo_policy
@@ -39,6 +40,7 @@ import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.misc.roboarena_config as roboarena_config
+import openpi.training.misc.robocasa365_config as robocasa365_config
 import openpi.training.optimizer as _optimizer
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
@@ -103,6 +105,9 @@ class DataConfig:
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
+
+    # Skip expensive validation only for local datasets already checked by the user.
+    fast_local_loading: bool = False
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -243,7 +248,6 @@ class MixedDataConfig(DataConfig):
 
     components: Sequence[DataConfig] = ()
     weights: Sequence[float] = ()
-    fast_local_loading: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -932,6 +936,44 @@ class LeRobotFrankaHKUSTDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=ModelTransformFactory()(model_config),
             action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotRoboCasa365DataConfig(DataConfigFactory):
+    """Full mobile RoboCasa365 controls, shared by training and policy serving."""
+
+    fast_local_loading: bool = False
+
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default_factory=lambda: _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/state": "observation.state",
+                        "observation/image": "observation.images.robot0_agentview_left",
+                        "observation/right_image": "observation.images.robot0_agentview_right",
+                        "observation/wrist_image": "observation.images.robot0_eye_in_hand",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+    )
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=_transforms.Group(
+                inputs=[robocasa365_policy.RoboCasa365Inputs(model_config.action_dim, model_config.model_type)],
+                outputs=[robocasa365_policy.RoboCasa365Outputs()],
+            ),
+            model_transforms=ModelTransformFactory()(model_config),
+            action_sequence_keys=("action",),
+            fast_local_loading=self.fast_local_loading,
         )
 
 
@@ -2461,6 +2503,8 @@ _CONFIGS = [
     # RoboArena configs.
     #
     *roboarena_config.get_roboarena_configs(),
+    # RoboCasa365 post-training uses the standard train_align.py entry point.
+    *robocasa365_config.get_robocasa365_configs(),
 ]
 
 

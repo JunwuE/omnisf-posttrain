@@ -182,6 +182,8 @@ If you want to embed a policy server call in your own robot runtime, we have a m
 
 ### More Examples
 
+RoboCasa365 post-training with π0.5 and VGGT / OmniVGGT spatial alignment is integrated into the standard training, normalization and serving entry points. See the [RoboCasa365 guide](examples/robocasa365/README.md) for the three target splits, mixed training, and Conda-based commands.
+
 We provide more examples for how to fine-tune and run inference with our models on the ALOHA platform in the following READMEs:
 - [ALOHA Simulator](examples/aloha_sim)
 - [ALOHA Real](examples/aloha_real)

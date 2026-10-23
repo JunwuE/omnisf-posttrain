@@ -12,10 +12,12 @@ import time
 import typing
 from typing import Literal, Protocol, SupportsIndex, TypeVar
 
+import datasets
 import jax
 import jax.numpy as jnp
 import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
 import numpy as np
+from packaging.version import Version
 import torch
 
 import openpi.models.model as _model
@@ -140,7 +142,40 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
-class _FastLocalLeRobotDataset(lerobot_dataset.LeRobotDataset):
+class _LeRobotHFDataset(datasets.Dataset):
+    """Keep the eager column interface expected by the pinned LeRobot v2 reader."""
+
+    def __getitem__(self, key):
+        result = super().__getitem__(key)
+        # datasets 4 returns a lazy Column, which torch.stack does not accept.
+        return list(result) if isinstance(key, str) else result
+
+
+class _LeRobotDataset(lerobot_dataset.LeRobotDataset):
+    def load_hf_dataset(self) -> datasets.Dataset:
+        dataset = super().load_hf_dataset()
+        # LeRobot loads Parquet directly here (no select/shuffle index table).
+        compatible = _LeRobotHFDataset(dataset.data, info=dataset.info, split=dataset.split)
+        compatible.set_transform(lerobot_dataset.hf_transform_to_torch)
+        return compatible
+
+    def _query_hf_dataset(self, query_indices: dict[str, list[int]]) -> dict:
+        return {
+            key: torch.stack(self.hf_dataset[indices][key])
+            for key, indices in query_indices.items()
+            if key not in self.meta.video_keys
+        }
+
+    def _get_query_timestamps(self, current_ts: float, query_indices=None) -> dict[str, list[float]]:
+        return {
+            key: torch.stack(self.hf_dataset[query_indices[key]]["timestamp"]).tolist()
+            if query_indices is not None and key in query_indices
+            else [current_ts]
+            for key in self.meta.video_keys
+        }
+
+
+class _FastLocalLeRobotDataset(_LeRobotDataset):
     """Read an immutable local LeRobot dataset without unused training-time validation."""
 
     def __init__(self, repo_id: str, info: dict, *, delta_timestamps: dict[str, list[float]]):
@@ -423,7 +458,7 @@ def create_torch_dataset(
         _create_single_lerobot_dataset(
             dataclasses.replace(data_config, repo_id=expanded_repo_id),
             action_horizon,
-            fast_local_loading=fast_local_loading,
+            fast_local_loading=fast_local_loading or data_config.fast_local_loading,
         )
         for expanded_repo_id in _config.expand_local_repo_ids(repo_id)
     ]
@@ -437,18 +472,34 @@ def _create_single_lerobot_dataset(
     fast_local_loading: bool,
 ) -> Dataset:
     repo_id = data_config.repo_id
-    if fast_local_loading:
-        root = pathlib.Path(repo_id).expanduser().resolve()
+    candidate = pathlib.Path(repo_id).expanduser()
+    is_local = repo_id.startswith(("/", "./", "../", "~")) or candidate.is_dir()
+    root = candidate.resolve() if is_local else None
+    if root is not None and not (root / "meta/info.json").is_file():
+        raise FileNotFoundError(f"Local LeRobot dataset is missing meta/info.json: {root}")
+    if root is not None:
         info = lerobot_dataset.load_info(root)
+        version = Version(info["codebase_version"])
+        supported_version = Version(lerobot_dataset.CODEBASE_VERSION)
+        if version.major > supported_version.major:
+            raise ValueError(
+                f"Dataset {root} uses {info['codebase_version']}; this LeRobot reader supports "
+                f"{lerobot_dataset.CODEBASE_VERSION}. Convert the dataset before training."
+            )
+        lerobot_dataset.check_version_compatibility(repo_id, version, supported_version)
+    if fast_local_loading:
+        if root is None:
+            raise ValueError("fast_local_loading requires a local dataset path, not a Hugging Face repo ID.")
         dataset = _FastLocalLeRobotDataset(
             str(root),
             info,
             delta_timestamps=_action_delta_timestamps(data_config, action_horizon, info["fps"]),
         )
     else:
-        dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
-        dataset = lerobot_dataset.LeRobotDataset(
+        dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=root)
+        dataset = _LeRobotDataset(
             repo_id,
+            root=root,
             delta_timestamps=_action_delta_timestamps(data_config, action_horizon, dataset_meta.fps),
         )
 
