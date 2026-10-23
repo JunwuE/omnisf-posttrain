@@ -17,9 +17,21 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 当前固定的 LeRobot 版本读取 **v2.1**。如果数据来自 v3.0 镜像，需要先完成
 v3.0 → v2.1 转换；本次接入复用现有 v2.1 加载器，没有引入新版 LeRobot。
-参考项目的转换脚本依赖另一个 `any4lerobot` 仓库及独立环境，不能仅复制脚本就完成转换。
-转换后检查 `meta/info.json` 的 `codebase_version`，以及各 episode 的视频时间戳从 0 开始。
-保持原始 v3.0 数据与转换结果分开存放。
+直接在 `omnisf` Conda 环境中转换，保持原始数据与输出分开存放：
+
+```bash
+python examples/robocasa365/convert_lerobot_v3_to_v21.py \
+  --source /path/to/robocasa365/robocasa365-target-atomic \
+  --output /path/to/robocasa365_lerobot2/robocasa365-target-atomic \
+  --workers 8
+```
+
+转换器保留状态、动作与任务信息，按 episode 无损拆分视频，并将时间戳归零。
+会逐文件校验 Parquet 回读结果、逐视频校验帧数和首帧时间戳；
+要求源 Parquet 文件按 episode 分界、视频 episode 边界为关键帧，否则明确报错。
+未完成结果保存在 `.incomplete` 目录，同一命令可断点继续；不会覆盖已完成的输出。
+`meta/conversion.json` 记录来源和校验范围。LeRobot 元数据统计只包含数值字段，
+没有编造源数据缺失的图像统计；模型使用下面独立计算的 state/actions norm。
 
 指定存放三个子集的父目录，训练和计算统计时使用同一个设置：
 
@@ -253,3 +265,20 @@ JAX_PLATFORMS=cpu python -m pytest -q \
 测试生成小型 LeRobot v2.1 Parquet 和 H.264 视频，覆盖完整动作、三相机、
 单集／混合统计、普通／快速读取、JAX batch、归一化逆变换及版本不匹配。
 测试中的 tokenizer 使用离线替身，不加载真实 π0.5 / VGGT 权重。
+
+## 5. Atomic：本机 4 卡，不使用 Slurm
+
+设置前面相同的数据、norm、JAX 权重、OmniVGGT 权重和 checkpoint 路径后运行：
+
+```bash
+# 当可见 GPU 多于 4 张时，指定本次使用的四张卡。
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+bash scripts/train_robocasa365_4gpu.sh
+```
+
+脚本复用 `train_align.py`，运行 60,000 个优化器更新。
+为保持 8 卡方案每卡 32 个样本的显存规模，4 卡采用 micro batch 128、梯度累积 2，
+有效全局 batch 仍为 256。VGGT 特征提取在同四张卡上分块运行。
+启动前检查数据、norm、权重和可见 GPU 数量。
+`bash scripts/train_robocasa365_4gpu.sh --dry-run` 可预览命令；
+恢复同一个实验使用 `bash scripts/train_robocasa365_4gpu.sh --resume`。
