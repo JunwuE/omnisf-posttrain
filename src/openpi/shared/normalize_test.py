@@ -41,3 +41,15 @@ def test_multiple_batch_dimensions():
 
     assert np.allclose(results.mean, expected_mean)
     assert np.allclose(results.std, expected_std)
+
+
+def test_float32_small_variance_is_preserved():
+    values = np.tile(np.array([[999.99], [1000.01]], dtype=np.float32), (512, 1))
+    stats = normalize.RunningStats()
+    for batch in np.array_split(values, 16):
+        stats.update(batch)
+    result = stats.get_statistics()
+    reference = values.astype(np.float64)
+    np.testing.assert_allclose(result.mean, reference.mean(axis=0), rtol=1e-12)
+    np.testing.assert_allclose(result.std, reference.std(axis=0), rtol=1e-6)
+    assert np.all(result.std > 0)

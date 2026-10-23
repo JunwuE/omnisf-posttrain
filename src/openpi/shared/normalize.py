@@ -34,6 +34,9 @@ class RunningStats:
         Args:
             vectors (np.ndarray): An array where all dimensions except the last are batch dimensions.
         """
+        # Float32 moments can erase small variances when E[x**2] and E[x]**2
+        # nearly cancel (for example, a robot base height with little motion).
+        batch = np.asarray(batch, dtype=np.float64)
         batch = batch.reshape(-1, batch.shape[-1])
         num_elements, vector_length = batch.shape
         if self._count == 0:
