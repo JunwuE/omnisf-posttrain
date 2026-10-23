@@ -150,7 +150,86 @@ Checkpoint 和统计目录分别可通过 `ROBOCASA365_CHECKPOINT_DIR`、`ROBOCA
 默认执行 LeRobot 的文件及时间戳校验。确认转换数据完整后，可加
 `--data.fast-local-loading`，单集和 mixed 都支持；快速模式仍检查数据格式版本。
 
-## 4. 推理
+## 4. Atomic：60,000 步、全局 batch 256、8 卡
+
+先在服务器设置数据和权重位置，并计算 atomic 归一化统计（已有匹配的统计可直接使用）：
+
+```bash
+conda activate omnisf
+cd /path/to/omnisf-posttrain
+export ROBOCASA365_DATA_ROOT=/path/to/robocasa365_v21
+export ROBOCASA365_PRETRAIN_PARAMS=/path/to/omnisf_checkpoint/params
+export ROBOCASA365_VGGT_PATH=/path/to/omnivggt
+export ROBOCASA365_ASSETS_DIR="$PWD/assets"
+export ROBOCASA365_CHECKPOINT_DIR=/path/to/training_checkpoints
+
+python scripts/compute_norm_stats.py \
+  --config-name robocasa365_target_atomic --batch-size 256 --num-workers 8
+```
+
+在已经分配到 8 张 GPU 的机器上直接启动：
+
+```bash
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+python scripts/train_align.py robocasa365_target_atomic \
+  --exp-name robocasa365_target_atomic_60k_bs256 \
+  --num-train-steps 60000 \
+  --batch-size 256 --gradient-accumulation-steps 1 \
+  --fsdp-devices 8 \
+  --align-target-model omnivggt --align-device-mode shared \
+  --align-vggt-devices 8 --align-feature-batch-size 16 \
+  --num-workers 16 \
+  --lr-schedule.decay-steps 60000 \
+  --save-interval 5000 --keep-period None \
+  --no-wandb-enabled
+```
+
+这里 `256` 是 8 卡合计的 batch，每卡 32；累积设为 1 后，有效 batch 也是 256。
+`60000` 是优化器更新次数。学习率衰减周期同步设为 60,000 步，warmup 和峰值沿用配置；
+若要保持原始 100,000 步衰减周期，可改为 `--lr-schedule.decay-steps 100000`。
+每 5,000 步保存一次，`keep-period None` 配合现有 checkpoint 管理器只保留最新一份，
+最后一次保存的目录步号为 `59999`。
+
+Slurm 服务器使用 [8 卡 sbatch 脚本](../../slurm_scripts/train_robocasa365_8gpu.sbatch)：
+
+```bash
+# 在仓库根目录提交；上面的数据、权重和输出目录环境变量会传入作业。
+export CONDA_BASE="$(conda info --base)"
+export CONDA_ENV=omnisf
+export PROJECT_ROOT="$PWD"
+export CONFIG=robocasa365_target_atomic
+export EXP_NAME=robocasa365_target_atomic_60k_bs256
+
+# 先预览实际命令，不申请 GPU，也不启动训练。
+bash slurm_scripts/train_robocasa365_8gpu.sbatch --dry-run
+
+# 替换为服务器实际的分区；若集群要求账户，再加 --account=你的账户。
+sbatch --partition=你的GPU分区 slurm_scripts/train_robocasa365_8gpu.sbatch
+```
+
+脚本申请 1 个节点、8 张 GPU、1 个任务、32 个 CPU、256 GB 内存和 48 小时运行时限。
+其中 48 小时只是作业时限，不代表预计训练耗时，可通过 `sbatch --time=... --mem=...` 覆盖。
+JAX 使用单个进程管理 8 卡；脚本沿用 Slurm 设置的 `CUDA_VISIBLE_DEVICES`。
+分区和账户按集群实际配置传入，原有 HKUST 脚本中的 `acd_u` 不作为通用默认值。
+Slurm 获得资源后会自动执行训练；日志位于提交目录的
+`omnisf-robocasa365-<job_id>.out` / `.err`。
+参见 [Slurm sbatch 文档](https://slurm.schedmd.com/sbatch.html)。
+
+查看任务与续训：
+
+```bash
+squeue -u "$USER"
+tail -f omnisf-robocasa365-<job_id>.out
+
+# 保持 CONFIG、EXP_NAME 和 checkpoint 目录相同；总目标仍为 60,000 步。
+sbatch --partition=你的GPU分区 slurm_scripts/train_robocasa365_8gpu.sbatch --resume
+```
+
+若训练显存不足，可用 `--batch-size 128 --gradient-accumulation-steps 2`，
+保持有效 batch 为 256；若是 VGGT 特征提取显存不足，可减小 `--align-feature-batch-size`。
+这些参数可追加在 sbatch 脚本名后覆盖默认值。切换数据子集时设置 `CONFIG` 并准备对应统计。
+
+## 5. 推理
 
 ```bash
 python scripts/serve_policy.py policy:checkpoint \
@@ -163,7 +242,7 @@ python scripts/serve_policy.py policy:checkpoint \
 图像支持 uint8 HWC 或 LeRobot 风格的 float CHW [0, 1]。
 服务端沿用 checkpoint 内保存的统计，输出 `(action_horizon, 12)` 原始控制动作。
 
-## 5. 回归测试
+## 6. 回归测试
 
 ```bash
 JAX_PLATFORMS=cpu python -m pytest -q \
