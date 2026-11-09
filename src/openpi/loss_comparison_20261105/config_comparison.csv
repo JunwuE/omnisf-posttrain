@@ -1,0 +1,31 @@
+﻿参数,Atomic noalign,Mixed noalign
+配置名,robocasa365_target_atomic,robocasa365_target_mixed
+训练入口,scripts/train.py,scripts/train.py
+模型,π0.5 / gemma_2b + gemma_300m,π0.5 / gemma_2b + gemma_300m
+微调方式,全参数微调，未使用 LoRA,全参数微调，未使用 LoRA
+初始化权重,OmniSF 35999,OmniSF 35999
+数据,仅 atomic,atomic + composite_seen + composite_unseen
+采样权重,1,"1,1,1；实际概率按 weight × frames"
+预期采样占比,atomic 100%,14.92% / 40.13% / 44.95%
+训练步数,60000,120000
+GPU / FSDP,4,8
+全局 batch,256,512
+每卡 batch,64,64
+梯度累积,1,1
+总样本抽取量（不去重）,15360000,61440000
+Alignment,关闭；系数 0；不加载 VGGT,关闭；系数 0；不加载 VGGT
+优化器,"AdamW β1=0.9, β2=0.95, ε=1e-8","AdamW β1=0.9, β2=0.95, ε=1e-8"
+Weight decay / 梯度裁剪,1e-10 / 1.0,1e-10 / 1.0
+学习率,cosine: 2.5e-5 → 2.5e-6,cosine: 2.5e-5 → 2.5e-6
+Warmup,1000,1000
+学习率 decay_steps,60000,120000
+EMA,0.999,0.999
+State dropout,0.25,0.25
+随机种子,42,42
+动作 horizon / 模型维度,50 / 32,50 / 32
+归一化,atomic quantile norm,三个子集共用 mixed quantile norm
+数据读取线程/worker 设置,16,32
+记录间隔,10,10
+Checkpoint 间隔,5000,5000
+Checkpoint 保留,最新；最终 59999,最新 + 每 20000 步；最终 119999
+W&B,关闭,关闭

@@ -1,0 +1,127 @@
+{
+  "created_at_utc": "2026-11-05T05:29:46.854753+00:00",
+  "runs": {
+    "atomic": {
+      "records": 6000,
+      "first_logged_step": 0,
+      "first_logged_loss": 2.417,
+      "last_logged_step": 59990,
+      "last_logged_loss": 0.0047,
+      "last_source_line": 6768,
+      "last_100_logged_steps": {
+        "records": 10,
+        "first_window_step": 59891,
+        "last_window_step": 59990,
+        "mean": 0.004739999999999999,
+        "min": 0.0045,
+        "max": 0.0049,
+        "std_population": 0.00015620499351813312
+      },
+      "last_1000_logged_steps": {
+        "records": 100,
+        "first_window_step": 58991,
+        "last_window_step": 59990,
+        "mean": 0.004768,
+        "min": 0.0042,
+        "max": 0.0054,
+        "std_population": 0.00023059921942625912
+      },
+      "last_5000_logged_steps": {
+        "records": 500,
+        "first_window_step": 54991,
+        "last_window_step": 59990,
+        "mean": 0.004845,
+        "min": 0.0042,
+        "max": 0.0055,
+        "std_population": 0.00021926011949280705
+      },
+      "milestones": {
+        "0": 2.417,
+        "10": 2.2736,
+        "100": 0.1307,
+        "500": 0.0332,
+        "1000": 0.0274,
+        "5000": 0.0207,
+        "10000": 0.0163,
+        "20000": 0.0116,
+        "30000": 0.009,
+        "40000": 0.0068,
+        "50000": 0.0052,
+        "59990": 0.0047
+      },
+      "checkpoint": "/share/project/robot-rfm/robot-exp/usr/ejw/posttrain/outputs/omnisf_atomic/checkpoints/robocasa365_target_atomic/robocasa365_atomic_noalign_4gpu_20261025T081627Z/59999",
+      "norm_sha256": "2d4c74ff56377ea3e79223dcf7b223913126f0bc332f8f6936a09550687fccaa"
+    },
+    "mixed": {
+      "records": 887,
+      "first_logged_step": 111130,
+      "first_logged_loss": 0.0069,
+      "last_logged_step": 119990,
+      "last_logged_loss": 0.0064,
+      "last_source_line": 928,
+      "last_100_logged_steps": {
+        "records": 10,
+        "first_window_step": 119891,
+        "last_window_step": 119990,
+        "mean": 0.00647,
+        "min": 0.0062,
+        "max": 0.0068,
+        "std_population": 0.000167630546142402
+      },
+      "last_1000_logged_steps": {
+        "records": 100,
+        "first_window_step": 118991,
+        "last_window_step": 119990,
+        "mean": 0.006534,
+        "min": 0.0062,
+        "max": 0.0069,
+        "std_population": 0.00016199999999999995
+      },
+      "last_5000_logged_steps": {
+        "records": 500,
+        "first_window_step": 114991,
+        "last_window_step": 119990,
+        "mean": 0.0065634,
+        "min": 0.0061,
+        "max": 0.007,
+        "std_population": 0.00015684527407607788
+      },
+      "milestones": {
+        "119990": 0.0064
+      },
+      "checkpoint": "/share/project/robot-rfm/robot-exp/usr/ejw/posttrain/outputs/omnisf_mixed/checkpoints/robocasa365_target_mixed/robocasa365_target_mixed_noalign_120k_bs512_8gpu/119999",
+      "norm_sha256": "e0e373053041c482ef3cd00a9fc240785eb3c601894bdc5d35d60f7d33fb728a"
+    }
+  },
+  "mixture_from_recipe_and_preparation_metadata": [
+    {
+      "name": "atomic",
+      "frames": 2231347,
+      "episodes": 9126,
+      "weight": 1.0,
+      "sampling_probability": 0.1491751615651369
+    },
+    {
+      "name": "composite_seen",
+      "frames": 6002265,
+      "episodes": 8077,
+      "weight": 1.0,
+      "sampling_probability": 0.40127727831295024
+    },
+    {
+      "name": "composite_unseen",
+      "frames": 6724287,
+      "episodes": 8104,
+      "weight": 1.0,
+      "sampling_probability": 0.4495475601219128
+    }
+  ],
+  "loss_definition": "Action flow-matching squared error, averaged over model action dimensions, action horizon and batch; no alignment.",
+  "logging_semantics": "Regular records average 10 optimizer updates and are rounded to 4 decimal places. Step 0 averages one update. Final 9 updates are not logged.",
+  "limitations": [
+    "Mixed logs before step 111130 are unavailable.",
+    "Different training data and normalization; not a controlled model-quality comparison.",
+    "Config JSON files are reconstructed, not immutable original complete config dumps."
+  ],
+  "plot_moving_average_records": 50
+}

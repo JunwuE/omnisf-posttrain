@@ -1,0 +1,87 @@
+[
+  {
+    "path": "/share/project/robot-rfm/robot-exp/usr/ejw/posttrain/outputs/omnisf_atomic/noalign_runs/robocasa365_atomic_noalign_4gpu_20261025T081627Z/train.log",
+    "bytes": 1759688,
+    "sha256": "7c36f8bbad2be8b486656b8c852ce6f02179fe89620d43f635ad7ea8bb0785dd"
+  },
+  {
+    "path": "/share/project/robot-rfm/robot-exp/usr/ejw/posttrain/outputs/omnisf_mixed/recovered_logs/20261105T052102Z/tmux_pane_0.log",
+    "bytes": 265433,
+    "sha256": "dbee53aac1fb927a9ca3d000e2a8bc472fa03f40270f7d2688e683494d2e7f90"
+  },
+  {
+    "path": "/share/project/robot-rfm/robot-exp/usr/ejw/posttrain/outputs/omnisf_atomic/noalign_runs/robocasa365_atomic_noalign_4gpu_20261025T081627Z/launch.json",
+    "bytes": 1095,
+    "sha256": "94d5bc61c870362d29aaa8bb5240a79758619becdbd82d3dace1490520236d6b"
+  },
+  {
+    "path": "/share/project/robot-rfm/robot-exp/usr/ejw/posttrain/outputs/omnisf_atomic/noalign_runs/robocasa365_atomic_noalign_4gpu_20261025T081627Z/environment.sh",
+    "bytes": 721,
+    "sha256": "8896b56523c10a6310b7ca100ae20b60a2fb5a1a6abfe7166139665ff4efad97"
+  },
+  {
+    "path": "/share/project/robot-rfm/robot-exp/usr/ejw/posttrain/outputs/omnisf_mixed/recovered_logs/20261105T052102Z/capture_manifest.json",
+    "bytes": 453,
+    "sha256": "35a14753a72a78e31880f37ce67a1dd734759c5ee6a4b376acc068acf688243d"
+  },
+  {
+    "path": "/share/project/robot-rfm/robot-exp/usr/ejw/posttrain/outputs/robocasa365_eval/success_diagnosis_20261105T041532Z/historical_comparison.json",
+    "bytes": 7858,
+    "sha256": "1fd2b514bb3d419ee06c811f75672885aa7d18194b7721231ac70d4df97cab4d"
+  },
+  {
+    "path": "/share/project/robot-rfm/robot-exp/usr/ejw/posttrain/outputs/omnisf_mixed/norm_stats_runs/20261029T075022Z/validation.json",
+    "bytes": 4811,
+    "sha256": "aae0ab36fffc4d78076c39389f562fe85d944c18d0d01283236f6ed3bbc97fe1"
+  },
+  {
+    "path": "/home/junwue/code/omnisf/scripts/train_robocasa365_noalign_4gpu.sh",
+    "bytes": 3775,
+    "sha256": "9ae41892e093bf2ae377f1028be845193263a4fa17df627245726cf55c493b3b"
+  },
+  {
+    "path": "/home/junwue/code/omnisf/scripts/train_robocasa365_mixed_noalign_8gpu.sh",
+    "bytes": 10776,
+    "sha256": "ca86af3b44884d731f94fb4b41b418fc176ee3b554c749594d5bd2a2d408e1d0"
+  },
+  {
+    "path": "/home/junwue/code/omnisf/examples/robocasa365/mixed_noalign_8gpu.env.sh",
+    "bytes": 1059,
+    "sha256": "66c92012cb836ba509be86f619d6a1fc050b79a708f5f97cf2d3135e19491a52"
+  },
+  {
+    "path": "/home/junwue/code/omnisf/src/openpi/training/misc/robocasa365_config.py",
+    "bytes": 4680,
+    "sha256": "902eec40614465f8604ae135dc1c7fb22052bd99e59ff41facfecfe91770803d"
+  },
+  {
+    "path": "/home/junwue/code/omnisf/src/openpi/training/optimizer.py",
+    "bytes": 3202,
+    "sha256": "cfb5d6f6aec61fbe961287b4015c652260628a0ed4682a0dbdc271b8e65431fa"
+  },
+  {
+    "path": "/home/junwue/code/omnisf/scripts/train.py",
+    "bytes": 17380,
+    "sha256": "c037a1af75f8a65356613d696e6e42ced94dbafdb4c165ad3fd5ab1e8d9a0954"
+  },
+  {
+    "path": "/home/junwue/code/omnisf/src/openpi/models/pi0.py",
+    "bytes": 12887,
+    "sha256": "24b32d7c6ed5e409459afa8ca5af96a4dae09c2dcdf48e828907e411f4f12342"
+  },
+  {
+    "path": "/home/junwue/code/omnisf/src/openpi/training/data_loader.py",
+    "bytes": 44399,
+    "sha256": "d36e0cbbb110e0fe17b4fc01d763baa59a7c423f66321f2d5e1842491cb0d49e"
+  },
+  {
+    "path": "/share/project/robot-rfm/robot-exp/usr/ejw/posttrain/outputs/loss_comparison_20261105/resolve_configs.py",
+    "bytes": 3460,
+    "sha256": "f06cc20597e49787c31f335cf530bfe68286207f13a6f1139ab01be9d52af48b"
+  },
+  {
+    "path": "/share/project/robot-rfm/robot-exp/usr/ejw/posttrain/outputs/loss_comparison_20261105/build_report.py",
+    "bytes": 19642,
+    "sha256": "bf4df32b3bb942d3a77cc34eceb090f87995c8aab604c2d093e832a6bce1c2eb"
+  }
+]

@@ -1,0 +1,23 @@
+{
+  "status": "passed",
+  "checked_at_utc": "2026-11-05T05:30:47.533702+00:00",
+  "series": {
+    "atomic": {
+      "rows": 6000,
+      "last_step": 59990,
+      "last_loss": 0.0047,
+      "last_1000_mean": 0.004768
+    },
+    "mixed": {
+      "rows": 887,
+      "last_step": 119990,
+      "last_loss": 0.0064,
+      "last_1000_mean": 0.006534
+    }
+  },
+  "source_hashes_verified": 17,
+  "mixed_matches_recovered_summary": true,
+  "checkpoints_match_evaluated_noalign_models": true,
+  "plot_visually_inspected": true,
+  "missing_mixed_history_inferred_or_filled": false
+}

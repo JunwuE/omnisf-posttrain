@@ -1,0 +1,103 @@
+{
+  "copied_at_utc": "2026-11-05T05:38:21.868530+00:00",
+  "source": "/share/project/robot-rfm/robot-exp/usr/ejw/posttrain/outputs/loss_comparison_20261105",
+  "destination": "/home/junwue/code/omnisf/src/openpi/loss_comparison_20261105",
+  "files": [
+    {
+      "file": "README.md",
+      "source_sha256": "b2702d0e15f610f633ccc8c7981840ae595773a1412f94525a35d5fcced68d90",
+      "destination_sha256": "b2702d0e15f610f633ccc8c7981840ae595773a1412f94525a35d5fcced68d90",
+      "shared_input_path_adjusted": false
+    },
+    {
+      "file": "atomic_config.json",
+      "source_sha256": "3961dba32a0acbebcd05f0dfe81b236fb84e68a8901ef9c15d8192ba4a4f8fc4",
+      "destination_sha256": "3961dba32a0acbebcd05f0dfe81b236fb84e68a8901ef9c15d8192ba4a4f8fc4",
+      "shared_input_path_adjusted": false
+    },
+    {
+      "file": "atomic_metrics.csv",
+      "source_sha256": "f9f64a38ccbf5e6615d102328d266839ed474f66ea662eb123fd9225c87c7398",
+      "destination_sha256": "f9f64a38ccbf5e6615d102328d266839ed474f66ea662eb123fd9225c87c7398",
+      "shared_input_path_adjusted": false
+    },
+    {
+      "file": "build_report.log",
+      "source_sha256": "2a4528c224f620d1bac0fb1e1e0d15e9165d613f93fb91cb98439a367fbc850f",
+      "destination_sha256": "2a4528c224f620d1bac0fb1e1e0d15e9165d613f93fb91cb98439a367fbc850f",
+      "shared_input_path_adjusted": false
+    },
+    {
+      "file": "build_report.py",
+      "source_sha256": "bf4df32b3bb942d3a77cc34eceb090f87995c8aab604c2d093e832a6bce1c2eb",
+      "destination_sha256": "e7b0c7c51121ef6c043c54de5f394d812b20d151286ecd7e0c1c95f7b3bc1cdd",
+      "shared_input_path_adjusted": true
+    },
+    {
+      "file": "config_comparison.csv",
+      "source_sha256": "7ce2f0ad8a964d8738b7c47a93fec9d633bd83d5bde97328a20985e19e4693ef",
+      "destination_sha256": "7ce2f0ad8a964d8738b7c47a93fec9d633bd83d5bde97328a20985e19e4693ef",
+      "shared_input_path_adjusted": false
+    },
+    {
+      "file": "config_resolution.log",
+      "source_sha256": "d406fa361025643e5d2818bf8025353cf16e09a096176d36c5c6020a5fa9f10a",
+      "destination_sha256": "d406fa361025643e5d2818bf8025353cf16e09a096176d36c5c6020a5fa9f10a",
+      "shared_input_path_adjusted": false
+    },
+    {
+      "file": "loss_curves.pdf",
+      "source_sha256": "720c4f82e54f0d111e2a4ae95195dfeadf0e6010d633f03e5e53b7730ed97885",
+      "destination_sha256": "720c4f82e54f0d111e2a4ae95195dfeadf0e6010d633f03e5e53b7730ed97885",
+      "shared_input_path_adjusted": false
+    },
+    {
+      "file": "loss_curves.png",
+      "source_sha256": "8b9dd34ca63e7570171f62f17265242e66dcf2cfaf475c81e91fb17f8dd0b99e",
+      "destination_sha256": "8b9dd34ca63e7570171f62f17265242e66dcf2cfaf475c81e91fb17f8dd0b99e",
+      "shared_input_path_adjusted": false
+    },
+    {
+      "file": "loss_curves.svg",
+      "source_sha256": "6bbd075ffc6f6a9c7138a97af8c7d790be2c432d4a0b8912f0d13342d37807a5",
+      "destination_sha256": "6bbd075ffc6f6a9c7138a97af8c7d790be2c432d4a0b8912f0d13342d37807a5",
+      "shared_input_path_adjusted": false
+    },
+    {
+      "file": "loss_summary.json",
+      "source_sha256": "c7910080797194fda85c53d98c3e17765e14829f6ccb7841e558d6c210582d16",
+      "destination_sha256": "c7910080797194fda85c53d98c3e17765e14829f6ccb7841e558d6c210582d16",
+      "shared_input_path_adjusted": false
+    },
+    {
+      "file": "mixed_config.json",
+      "source_sha256": "2fab7f16ba37668015cccf492532ceb06b329f709c835c5c29a2b9348ebc0248",
+      "destination_sha256": "2fab7f16ba37668015cccf492532ceb06b329f709c835c5c29a2b9348ebc0248",
+      "shared_input_path_adjusted": false
+    },
+    {
+      "file": "mixed_metrics.csv",
+      "source_sha256": "1efc9f0794915432e994a126c39211f149cdaaf28bb173a7088039a7325e4b4b",
+      "destination_sha256": "1efc9f0794915432e994a126c39211f149cdaaf28bb173a7088039a7325e4b4b",
+      "shared_input_path_adjusted": false
+    },
+    {
+      "file": "resolve_configs.py",
+      "source_sha256": "f06cc20597e49787c31f335cf530bfe68286207f13a6f1139ab01be9d52af48b",
+      "destination_sha256": "a6410fe12e1b7e8d87c6450a1d4ee3be5035d7e794005ddec3f8c50d93d0a7a9",
+      "shared_input_path_adjusted": true
+    },
+    {
+      "file": "source_manifest.json",
+      "source_sha256": "f6b1f43e0aec862d4a126773594bfcfee7e90c779d505b41cdf9267d649ce710",
+      "destination_sha256": "f6b1f43e0aec862d4a126773594bfcfee7e90c779d505b41cdf9267d649ce710",
+      "shared_input_path_adjusted": false
+    },
+    {
+      "file": "validation.json",
+      "source_sha256": "151492ab455a261329176fc6714c35efd2323647b2b9702575309c029631d18e",
+      "destination_sha256": "151492ab455a261329176fc6714c35efd2323647b2b9702575309c029631d18e",
+      "shared_input_path_adjusted": false
+    }
+  ]
+}

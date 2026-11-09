@@ -1,0 +1,257 @@
+{
+  "reconstructed_at_utc": "2026-11-05T05:29:00.626461+00:00",
+  "provenance": "Current mixed launcher defaults and base config, consistent with recovered log target/batch. Original startup log is unavailable; additional historical CLI/env overrides cannot be excluded.",
+  "command": "python -u scripts/train.py robocasa365_target_mixed --exp-name robocasa365_target_mixed_noalign_120k_bs512_8gpu --num-train-steps 120000 --batch-size 512 --gradient-accumulation-steps 1 --fsdp-devices 8 --no-align-enabled --align-loss-coeff 0 --vggt-weight-path None --num-workers 32 --data.fast-local-loading --lr-schedule.warmup-steps 1000 --lr-schedule.peak-lr 2.5e-5 --lr-schedule.decay-steps 120000 --lr-schedule.decay-lr 2.5e-6 --log-interval 10 --save-interval 5000 --keep-period 20000 --no-wandb-enabled",
+  "config": {
+    "name": "robocasa365_target_mixed",
+    "project_name": "robocasa365_omnisf",
+    "exp_name": "robocasa365_target_mixed_noalign_120k_bs512_8gpu",
+    "model": {
+      "action_dim": 32,
+      "action_horizon": 50,
+      "max_token_len": 200,
+      "dtype": "bfloat16",
+      "paligemma_variant": "gemma_2b",
+      "action_expert_variant": "gemma_300m",
+      "pi05": true,
+      "discrete_state_input": true
+    },
+    "weight_loader": {
+      "params_path": "/share/project/robot-model/omnisf/35999/omnisf_9.0_jax_35999/params"
+    },
+    "pytorch_weight_path": null,
+    "vggt_weight_path": null,
+    "vggt_dim": 1024,
+    "vla_layers_align": 12,
+    "vla_adapt_layers_align": false,
+    "vggt_layers_align": -1,
+    "vggt_adapt_layers_align": false,
+    "pooling_func": "bilinear",
+    "use_vggt_pe": true,
+    "use_vlm_norm": true,
+    "use_camera_params": false,
+    "ignore_img_padding_area": true,
+    "save_SF_feature": null,
+    "load_SF_offline": null,
+    "align_loss_coeff": 0.0,
+    "iSF_conv": false,
+    "iSF_zscore": false,
+    "align_enabled": false,
+    "align_target_model": "auto",
+    "align_device_mode": "shared",
+    "align_vggt_devices": 1,
+    "align_feature_batch_size": 1,
+    "pytorch_training_precision": "bfloat16",
+    "lr_schedule": {
+      "warmup_steps": 1000,
+      "peak_lr": 2.5e-05,
+      "decay_steps": 120000,
+      "decay_lr": 2.5e-06
+    },
+    "optimizer": {
+      "b1": 0.9,
+      "b2": 0.95,
+      "eps": 1e-08,
+      "weight_decay": 1e-10,
+      "clip_gradient_norm": 1.0
+    },
+    "ema_decay": 0.999,
+    "freeze_filter": "<class 'flax.nnx.filterlib.Nothing'>",
+    "data": {
+      "repo_id": "robocasa365-target-mixed",
+      "assets": {
+        "assets_dir": "/share/project/robot-rfm/robot-exp/usr/ejw/posttrain/outputs/omnisf_mixed/assets",
+        "asset_id": "robocasa365_target_mixed"
+      },
+      "base_config": null,
+      "use_quantile_norm": true,
+      "sources": [
+        {
+          "name": "atomic",
+          "weight": 1.0,
+          "data_factory": {
+            "repo_id": "/share-mixed/project/robot-rfm/robot-raw-data/robocasa365_lerobot2/robocasa365-target-atomic",
+            "assets": {
+              "assets_dir": null,
+              "asset_id": null
+            },
+            "base_config": {
+              "repo_id": null,
+              "asset_id": null,
+              "norm_stats": null,
+              "repack_transforms": {
+                "inputs": [],
+                "outputs": []
+              },
+              "data_transforms": {
+                "inputs": [],
+                "outputs": []
+              },
+              "model_transforms": {
+                "inputs": [],
+                "outputs": []
+              },
+              "use_quantile_norm": false,
+              "action_sequence_keys": [
+                "actions"
+              ],
+              "prompt_from_task": true,
+              "fast_local_loading": false,
+              "rlds_data_dir": null,
+              "action_space": null,
+              "filter_dict_path": null,
+              "pad_camera_params": false
+            },
+            "use_quantile_norm": true,
+            "fast_local_loading": false,
+            "repack_transforms": {
+              "inputs": [
+                {
+                  "structure": {
+                    "observation/state": "observation.state",
+                    "observation/image": "observation.images.robot0_agentview_left",
+                    "observation/right_image": "observation.images.robot0_agentview_right",
+                    "observation/wrist_image": "observation.images.robot0_eye_in_hand",
+                    "actions": "action",
+                    "prompt": "prompt"
+                  }
+                }
+              ],
+              "outputs": []
+            }
+          }
+        },
+        {
+          "name": "composite_seen",
+          "weight": 1.0,
+          "data_factory": {
+            "repo_id": "/share-mixed/project/robot-rfm/robot-raw-data/robocasa365_lerobot2/robocasa365-target-composite-seen",
+            "assets": {
+              "assets_dir": null,
+              "asset_id": null
+            },
+            "base_config": {
+              "repo_id": null,
+              "asset_id": null,
+              "norm_stats": null,
+              "repack_transforms": {
+                "inputs": [],
+                "outputs": []
+              },
+              "data_transforms": {
+                "inputs": [],
+                "outputs": []
+              },
+              "model_transforms": {
+                "inputs": [],
+                "outputs": []
+              },
+              "use_quantile_norm": false,
+              "action_sequence_keys": [
+                "actions"
+              ],
+              "prompt_from_task": true,
+              "fast_local_loading": false,
+              "rlds_data_dir": null,
+              "action_space": null,
+              "filter_dict_path": null,
+              "pad_camera_params": false
+            },
+            "use_quantile_norm": true,
+            "fast_local_loading": false,
+            "repack_transforms": {
+              "inputs": [
+                {
+                  "structure": {
+                    "observation/state": "observation.state",
+                    "observation/image": "observation.images.robot0_agentview_left",
+                    "observation/right_image": "observation.images.robot0_agentview_right",
+                    "observation/wrist_image": "observation.images.robot0_eye_in_hand",
+                    "actions": "action",
+                    "prompt": "prompt"
+                  }
+                }
+              ],
+              "outputs": []
+            }
+          }
+        },
+        {
+          "name": "composite_unseen",
+          "weight": 1.0,
+          "data_factory": {
+            "repo_id": "/share-mixed/project/robot-rfm/robot-raw-data/robocasa365_lerobot2/robocasa365-target-composite-unseen",
+            "assets": {
+              "assets_dir": null,
+              "asset_id": null
+            },
+            "base_config": {
+              "repo_id": null,
+              "asset_id": null,
+              "norm_stats": null,
+              "repack_transforms": {
+                "inputs": [],
+                "outputs": []
+              },
+              "data_transforms": {
+                "inputs": [],
+                "outputs": []
+              },
+              "model_transforms": {
+                "inputs": [],
+                "outputs": []
+              },
+              "use_quantile_norm": false,
+              "action_sequence_keys": [
+                "actions"
+              ],
+              "prompt_from_task": true,
+              "fast_local_loading": false,
+              "rlds_data_dir": null,
+              "action_space": null,
+              "filter_dict_path": null,
+              "pad_camera_params": false
+            },
+            "use_quantile_norm": true,
+            "fast_local_loading": false,
+            "repack_transforms": {
+              "inputs": [
+                {
+                  "structure": {
+                    "observation/state": "observation.state",
+                    "observation/image": "observation.images.robot0_agentview_left",
+                    "observation/right_image": "observation.images.robot0_agentview_right",
+                    "observation/wrist_image": "observation.images.robot0_eye_in_hand",
+                    "actions": "action",
+                    "prompt": "prompt"
+                  }
+                }
+              ],
+              "outputs": []
+            }
+          }
+        }
+      ],
+      "pad_camera_params": false,
+      "use_eef_action": false,
+      "fast_local_loading": true
+    },
+    "state_dropout_prob": 0.25,
+    "assets_base_dir": "/share/project/robot-rfm/robot-exp/usr/ejw/posttrain/outputs/omnisf_mixed/assets",
+    "checkpoint_base_dir": "/share/project/robot-rfm/robot-exp/usr/ejw/posttrain/outputs/omnisf_mixed/checkpoints",
+    "seed": 42,
+    "batch_size": 512,
+    "gradient_accumulation_steps": 1,
+    "num_workers": 32,
+    "num_train_steps": 120000,
+    "log_interval": 10,
+    "save_interval": 5000,
+    "keep_period": 20000,
+    "overwrite": false,
+    "resume": false,
+    "wandb_enabled": false,
+    "policy_metadata": null,
+    "fsdp_devices": 8
+  },
+  "effective_batch_size": 512
+}
