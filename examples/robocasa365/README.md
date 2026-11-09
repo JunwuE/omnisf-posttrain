@@ -1,8 +1,8 @@
 # RoboCasa365 后训练
 
 RoboCasa365 已注册到 `openpi.training.config`，直接复用主仓库的
-`scripts/train_align.py`、`scripts/compute_norm_stats.py` 和 `scripts/serve_policy.py`。
-π0.5 使用 JAX 训练，VGGT / OmniVGGT 使用现有 PyTorch 特征提取分支进行空间对齐。
+`scripts/train.py`、`scripts/train_align.py`、`scripts/compute_norm_stats.py` 和 `scripts/serve_policy.py`。
+π0.5 使用 JAX 训练；可选择纯动作后训练，或使用 VGGT / OmniVGGT 的 PyTorch 特征提取分支进行空间对齐。
 运行时不需要 `omnisf_robocasa365`、动态注册脚本或修改 `PYTHONPATH`。
 
 ## 1. 环境与数据
@@ -101,23 +101,8 @@ python scripts/compute_norm_stats.py \
 
 ## 3. 使用现有空间对齐训练入口
 
-下载作者提供的 OmniSF JAX checkpoint 和组件权重：
-
-```bash
-python -m pip install modelscope==1.40.2 modelscope-hub==0.4.6
-python examples/robocasa365/download_pretrained_weights.py \
-  --model-root /path/to/shared/robot-model --prompt-token
-```
-
-在不回显的提示中输入 ModelScope token，也可通过 `MODELSCOPE_API_TOKEN` 环境变量传入。
-脚本从 dataset `haofuly/omnisf` 仅下载 `omnisf_9.0_jax_35999/*`，
-从 model `haofuly/omnisf-Components-ckpts` 下载完整组件仓库，各使用 32 个下载线程。
-输出分别位于 `<model-root>/omnisf` 和 `<model-root>/omnisf-Components-ckpts`。
-文件大小、可用的远端 SHA256 和下载状态记录在 `<model-root>/.downloads/`；token 不写入文件。
-失败后重跑同一命令可重试。代理无法访问时，可用 `--direct` 仅对此进程禁用代理，
-或用 `--endpoint https://www.modelscope.ai` 选择官方国际站点。
-
-先设置真实的预训练权重路径：
+使用已准备好的 OmniSF JAX checkpoint；启用空间对齐时还需要 OmniVGGT 组件权重。
+设置实际的预训练权重路径：
 
 ```bash
 # JAX checkpoint 的 params 目录，不是 PyTorch safetensors。
@@ -259,6 +244,8 @@ sbatch --partition=你的GPU分区 slurm_scripts/train_robocasa365_8gpu.sbatch -
 
 ## 5. Atomic：本机 4 卡，不使用 Slurm
 
+### 5.1 带 OmniVGGT 空间对齐
+
 设置前面相同的数据、norm、JAX 权重、OmniVGGT 权重和 checkpoint 路径后运行：
 
 ```bash
@@ -268,11 +255,152 @@ bash scripts/train_robocasa365_4gpu.sh
 ```
 
 脚本复用 `train_align.py`，运行 60,000 个优化器更新。
-沿用 8 卡方案每卡 32 个样本的设置，4 卡采用 micro batch 128、梯度累积 2，
-有效全局 batch 仍为 256。VGGT 特征提取在同四张卡上分块运行。
+全局 batch 256，每卡 64 个样本，梯度累积 1。
+VGGT 特征提取在同四张卡上分块运行。
 启动前检查数据、norm、权重和可见 GPU 数量。
 `bash scripts/train_robocasa365_4gpu.sh --dry-run` 可预览命令；
 恢复同一个实验使用 `bash scripts/train_robocasa365_4gpu.sh --resume`。
+
+### 5.2 纯动作后训练，不使用 VGGT
+
+`scripts/train_robocasa365_noalign_4gpu.sh` 直接调用 `scripts/train.py`，
+复用 `robocasa365_target_atomic` 的数据、norm、π0.5 模型和优化器设置。
+它显式关闭 `align_enabled`、将 `align_loss_coeff` 设为 0，并清空 VGGT 权重路径；
+训练仅计算动作 flow-matching loss，不创建 VGGT、对齐投影头或特征提取 worker。
+不需要设置 `ROBOCASA365_VGGT_PATH`。
+
+先设置 `ROBOCASA365_DATA_ROOT`、`ROBOCASA365_ASSETS_DIR`、
+`ROBOCASA365_PRETRAIN_PARAMS` 和 `ROBOCASA365_CHECKPOINT_DIR`，
+或 source 已有的路径配置文件，再设置独立实验名：
+
+```bash
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+export EXP_NAME="robocasa365_atomic_noalign_4gpu_$(date +%Y%m%d_%H%M%S)"
+bash scripts/train_robocasa365_noalign_4gpu.sh
+```
+
+脚本自动激活 `omnisf` Conda 环境，默认 60,000 步、全局 batch 256、
+梯度累积 1、FSDP 4、数据 worker 16，开启本地快速加载；
+每 10 步打印日志，每 5,000 步保存 checkpoint。
+JAX 默认使用可复用显存分配的 `default` allocator，并关闭启动时预分配；
+可通过 `XLA_PYTHON_CLIENT_ALLOCATOR` 环境变量覆盖。
+末尾追加训练参数可覆盖默认值，例如 `--log-interval 100`。
+
+`--dry-run` 仅打印启动命令，`--check-only` 检查数据、norm、JAX 权重路径和四卡可见性，
+两者都不会启动训练。检查卡数不代表显卡空闲，应等原训练结束或使用另外四张空闲卡。
+续训时保持同一个纯动作实验的 `EXP_NAME`，追加 `--resume`；
+带对齐训练的 checkpoint 含有额外模型和优化器状态，不能直接作为本入口的续训 checkpoint。
+已有 OmniSF 的 `params` 仍可通过 `ROBOCASA365_PRETRAIN_PARAMS` 用作初始化权重，
+权重加载器仅选取 π0.5 模型对应的参数。
+
+日志中的 `train_step_s` 为 JAX 更新耗时，`data_wait_s` 为取下一批数据的耗时。
+移除在线 VGGT 后预计耗时会下降，实际速度需在编译结束、训练稳定后测量。
+
+### 5.3 三个 target 子集：单机 8 卡、batch 512、120,000 步，无 align
+
+入口：`scripts/train_robocasa365_mixed_noalign_8gpu.sh`。
+复用 `robocasa365_target_mixed` 和 `scripts/train.py`，一个 Python 进程使用 8 张 GPU，
+全局 batch 512（每卡 64）、梯度累积 1、FSDP 8，只计算动作 loss。
+不需要 OmniVGGT 权重，也不通过 `torchrun` 启动多个进程。
+
+默认 warmup 1,000 步、峰值学习率 `2.5e-5`，cosine 衰减到第 120,000 步的 `2.5e-6`。
+`--num-workers 32` 在现有 mixed 加载器中表示 32 个读取线程，共享一份数据集；
+可追加 `--num-workers 16` 调低。每 10 步记录日志，每 5,000 步保存，
+保留最新 checkpoint 及每 20,000 步的 checkpoint，便于中途评估；追加 `--keep-period None`
+可改成只留最新一份。
+
+启动脚本自动加载 `examples/robocasa365/mixed_noalign_8gpu.env.sh` 的共享存储路径，
+新终端无需手动 export 四个必需路径；显式设置的环境变量优先。
+`OPENPI_DATA_HOME` 默认指向 `/share/project/robot-rfm/cache/openpi`，复用已经准备好的
+`big_vision/paligemma_tokenizer.model`。新服务器不需要再次从 Google 存储下载分词器；
+启动检查会验证文件存在且能被 SentencePiece 加载。显式设置 `OPENPI_DATA_HOME` 时，
+该目录也必须包含相同的分词器文件。若旧进程已经停在下载处，终止后重新启动才能使用新配置。
+DATA_ROOT 默认与已有 atomic 相同，包含三个独立的 **v2.1** 子集。
+训练时直接从这三个目录在线采样，不创建额外的 mixed 数据集。
+路径默认值如下，手动准备数据时也可直接 source 该文件：
+
+```bash
+source /root/miniconda3/etc/profile.d/conda.sh
+conda activate omnisf
+cd /home/junwue/code/omnisf
+export ROBOCASA365_SOURCE_DATA_ROOT=/share-mixed/project/robot-rfm/robot-raw-data/robocasa365
+export ROBOCASA365_DATA_ROOT=/share-mixed/project/robot-rfm/robot-raw-data/robocasa365_lerobot2
+export ROBOCASA365_ASSETS_DIR=/share/project/robot-rfm/robot-exp/usr/ejw/posttrain/outputs/omnisf_mixed/assets
+export ROBOCASA365_CHECKPOINT_DIR=/share/project/robot-rfm/robot-exp/usr/ejw/posttrain/outputs/omnisf_mixed/checkpoints
+export ROBOCASA365_PRETRAIN_PARAMS=/share/project/robot-model/omnisf/35999/omnisf_9.0_jax_35999/params
+export ROBOCASA365_MIXED_WEIGHTS=1,1,1
+export EXP_NAME=robocasa365_target_mixed_noalign_120k_bs512_8gpu
+```
+
+若两个 composite 子集尚未转换，可将它们分别转换到 atomic 旁边；
+三个子集都已经准备好时，跳过转换。下面是可重用的准备命令：
+
+```bash
+(
+    set -e  # 转换失败时停止这段准备流程。
+    mkdir -p "$ROBOCASA365_DATA_ROOT"
+    for split in composite-seen composite-unseen; do
+        if [[ ! -f "$ROBOCASA365_DATA_ROOT/robocasa365-target-$split/meta/info.json" ]]; then
+            python examples/robocasa365/convert_lerobot_v3_to_v21.py \
+                --source "$ROBOCASA365_SOURCE_DATA_ROOT/robocasa365-target-$split" \
+                --output "$ROBOCASA365_DATA_ROOT/robocasa365-target-$split" --workers 8
+        fi
+    done
+
+)
+```
+
+`mixed` 归一化统计与混合采样是两个独立步骤。统计文件只是 state/action 的均值、标准差和
+分位数，用于训练输入与推理输出的缩放，不合并或复制数据集。
+已有来源、采样权重兼容的统计文件时可直接使用；需要新统计时，在 CPU 上运行：
+
+```bash
+CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu python scripts/compute_norm_stats.py \
+    --config-name robocasa365_target_mixed --batch-size 512 --num-workers 4
+```
+
+默认 `1,1,1` 表示按各子集帧数混合，当前三组采样概率约为 **14.9%、40.1%、45.0%**。
+若希望三组各占约 1/3，可将权重设成各组 `meta/info.json` 中 `total_frames` 的倒数；
+改变混合比例后需在独立 assets 目录重新计算统计，并使用新实验名。
+启动检查会验证统计维度和有限值，但不能证明外部统计文件的数据来源或权重，
+因此不能直接沿用 atomic 的统计或来源不明的 mixed 统计。
+
+在具有 8 张可用 GPU 的节点执行：
+
+```bash
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+bash scripts/train_robocasa365_mixed_noalign_8gpu.sh --dry-run
+bash scripts/train_robocasa365_mixed_noalign_8gpu.sh --check-only
+bash scripts/train_robocasa365_mixed_noalign_8gpu.sh
+# 继续本实验时，使用相同的环境与 EXP_NAME：
+# bash scripts/train_robocasa365_mixed_noalign_8gpu.sh --resume
+```
+
+`--check-only` 校验三组数据的文件清单、mixed norm、本地分词器、预训练权重、可见卡数和实验目录，
+不会创建训练进程；文件清单检查不代替视频内容解码验证，也不检查 GPU 是否空闲。
+`--resume` 恢复已有的完整 checkpoint。如果启动阶段中断、实验目录仍为空，
+也可使用 `--resume` 重试：训练器会从预训练参数初始化，从第 0 步开始，保留该目录。
+目录含有不完整 checkpoint 或其他文件、却没有可恢复状态时仍会报错。
+带 align 的 atomic checkpoint 不能作为这里的 `--resume` 训练状态；
+新实验从 `ROBOCASA365_PRETRAIN_PARAMS` 初始化 π0.5。
+
+120,000 × 512 = 61,440,000 次帧起点采样，按目前约 1,496 万帧计算约为 4.1 轮等效采样，
+并非保证每帧恰好遍历四次。建议用保留的中间 checkpoint 分别评估三个子集，
+根据成功率判断是否需要完整跑到 120,000 步。
+这是三个 target 子集的联合后训练；[官方 foundation-model 设置](https://robocasa.ai/docs/build/html/benchmarking/foundation_model_learning.html)
+是三个子集分别微调，报告结果时应注明训练数据范围。
+
+### 5.4 单独训练 composite_seen / composite_unseen，并保存 loss
+
+两个子集均沿用 mixed 的 8 卡、120,000 步、全局 batch 512、关闭 alignment 配方，
+分别从原始 OmniSF 35999 权重初始化，使用各自的全量归一化统计和独立输出目录。
+
+- [Composite Seen 启动、统计及日志说明](composite_seen.md)
+- [Composite Unseen 启动及顺序排队说明](composite_unseen.md)
+
+启动脚本自动保存完整 `train.log` 和每 10 步打印的区间平均 loss `metrics.csv`。
+Seen → Unseen 队列会等待 Seen 正常结束、最终 checkpoint 保存完整及 GPU 释放，
+随后启动 Unseen。相关路径可通过各自的 `.env.sh` 或环境变量设置。
 
 ## 6. 推理
 

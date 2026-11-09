@@ -10,13 +10,13 @@ CONDA_BASE=${CONDA_BASE:-$HOME/miniconda3}
 CONDA_ENV=${CONDA_ENV:-omnisf}
 cd "$PROJECT_ROOT"
 
-# Keep the same 32 samples/GPU as the eight-GPU recipe. Two microsteps
-# per optimizer update give an effective global batch of 128 * 2 = 256.
+# Each GPU processes 64 samples. One microstep per optimizer update
+# gives an effective global batch of 256 without gradient accumulation.
 train_command=(
     python -u scripts/train_align.py "$CONFIG"
     --exp-name "$EXP_NAME"
     --num-train-steps 60000
-    --batch-size 128 --gradient-accumulation-steps 2
+    --batch-size 256 --gradient-accumulation-steps 1
     --fsdp-devices 4
     --align-target-model omnivggt --align-device-mode shared
     --align-vggt-devices 4 --align-feature-batch-size 16
@@ -75,7 +75,7 @@ if not vggt.is_file():
     raise SystemExit('Missing OmniVGGT weights: ' + str(vggt))
 if torch.cuda.device_count() != 4:
     raise SystemExit(f'Expected 4 visible GPUs, found {torch.cuda.device_count()}. Set CUDA_VISIBLE_DEVICES if needed.')
-print('Ready: 4 GPUs, 60,000 optimizer updates, effective batch 256 (128 x 2).', flush=True)
+print('Ready: 4 GPUs, 60,000 optimizer updates, batch 256, no gradient accumulation.', flush=True)
 PY
 
 exec "${train_command[@]}" "$@"
